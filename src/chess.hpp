@@ -18,7 +18,19 @@ struct Move {
     uint8_t flags = 0;
 };
 
-enum class Status { Playing, Check, Checkmate, Stalemate };
+enum class Status { Playing, Check, Checkmate, Stalemate, Repetition };
+
+// What makes two positions "the same" for repetition (FIDE art. 9.2): placement, side to move,
+// castling rights, and the en-passant square only when an en-passant capture is actually legal.
+struct PositionKey {
+    std::array<int8_t, 64> sq;
+    uint8_t side;
+    uint8_t castling;
+    int8_t ep;
+    bool operator==(const PositionKey& o) const {
+        return sq == o.sq && side == o.side && castling == o.castling && ep == o.ep;
+    }
+};
 
 // Square index = rank * 8 + file; rank 0 is white's back rank, file 0 is the a-file.
 inline int fileOf(int s) { return s & 7; }
@@ -40,6 +52,7 @@ struct Position {
     bool attacked(int square, Side by) const;
     bool inCheck(Side c) const;
     int kingSquare(Side c) const;
+    PositionKey key() const;
 
 private:
     void pseudoMoves(std::vector<Move>& out) const;

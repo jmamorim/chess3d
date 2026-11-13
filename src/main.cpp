@@ -107,6 +107,7 @@ private:
     std::vector<Move> moves_;  // moves played, parallel to history_
     std::vector<Move> legal_;
     Status status_ = Status::Playing;
+    int reps_ = 1;  // occurrences of the current position, this one included
     int selected_ = -1, hovered_ = -1;
     int promoTo_ = -1, promoHover_ = -1;  // promotion picker: target square (-1 = closed), hovered slot
     int animFrom_ = -1, animTo_ = -1;
@@ -140,6 +141,11 @@ private:
         const bool check = pos_.inCheck(pos_.side);
         status_ = legal_.empty() ? (check ? Status::Checkmate : Status::Stalemate)
                                  : (check ? Status::Check : Status::Playing);
+        const PositionKey key = pos_.key();
+        reps_ = 1;
+        for (const Position& p : history_) reps_ += p.key() == key;
+        // FIDE 9.6.1: the fifth occurrence ends the game without a claim.
+        if (!gameOver() && reps_ >= 5) status_ = Status::Repetition;
         if (autoRotate_) faceSideToMove();
     }
 
@@ -168,6 +174,11 @@ private:
         animT_ = 1;
         refresh();
     }
+
+    bool gameOver() const {
+        return status_ == Status::Checkmate || status_ == Status::Stalemate || status_ == Status::Repetition;
+    }
+    bool canClaimDraw() const { return !gameOver() && reps_ >= 3; }
 
     bool ownPiece(int s) const { return s >= 0 && pos_.sq[s] != EMPTY && sideOf(pos_.sq[s]) == pos_.side; }
 
@@ -226,6 +237,10 @@ private:
         if (IsKeyPressed(KEY_R)) reset();
         if (IsKeyPressed(KEY_U) || IsKeyPressed(KEY_BACKSPACE)) undo();
         if (IsKeyPressed(KEY_F)) targetYaw_ += PI;
+        if (IsKeyPressed(KEY_D) && canClaimDraw()) {
+            clearSelection();
+            status_ = Status::Repetition;
+        }
         if (IsKeyPressed(KEY_A)) {
             autoRotate_ = !autoRotate_;
             if (autoRotate_) faceSideToMove();
@@ -241,13 +256,12 @@ private:
             hovered_ = squareAt(Vector3Add(ray.position, Vector3Scale(ray.direction, t)));
         }
 
-        const bool gameOver = status_ == Status::Checkmate || status_ == Status::Stalemate;
         const bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
         if (promoTo_ >= 0) {
             // Esc or a click off the picker cancels; the pawn stays selected.
             if (IsKeyPressed(KEY_ESCAPE) || (click && promoHover_ < 0)) promoTo_ = -1;
             else if (click) play(*findMove(promoTo_, kPromoChoices[promoHover_]));
-        } else if (click && !gameOver) {
+        } else if (click && !gameOver()) {
             if (hovered_ < 0) {
                 selected_ = -1;
             } else if (isPromotion(hovered_)) {
@@ -362,12 +376,18 @@ private:
             case Status::Check: text = TextFormat("%s to move - CHECK", side); color = kCheck; break;
             case Status::Checkmate: text = TextFormat("Checkmate - %s wins", winner); color = kSelect; break;
             case Status::Stalemate: text = "Stalemate - draw"; color = kSelect; break;
+            case Status::Repetition:
+                text = reps_ >= 5 ? "Draw - fivefold repetition" : "Draw - threefold repetition claimed";
+                color = kSelect;
+                break;
         }
         DrawRectangle(12, 12, MeasureText(text, 28) + 24, 44, Fade(BLACK, 0.55f));
         DrawText(text, 24, 20, 28, color);
         DrawText(TextFormat("Move %d", static_cast<int>(moves_.size()) / 2 + 1), 24, 62, 18, Fade(RAYWHITE, 0.6f));
         if (promoTo_ >= 0)
             DrawText("Choose a promotion piece  (Esc or click elsewhere to cancel)", 12, GetScreenHeight() - 56, 18, kSelect);
+        else if (canClaimDraw())
+            DrawText("Threefold repetition - press D to claim a draw", 12, GetScreenHeight() - 56, 18, kSelect);
 
         const char* help = TextFormat("LMB select/move   RMB drag orbit   Wheel zoom   U undo   R restart   F flip   A auto-rotate [%s]",
                                       autoRotate_ ? "on" : "off");

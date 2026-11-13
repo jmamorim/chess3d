@@ -213,4 +213,12 @@ std::vector<Move> Position::legalMoves() const {
     return legal;
 }
 
+PositionKey Position::key() const {
+    int8_t epKey = -1;
+    if (ep >= 0)
+        for (const Move& m : legalMoves())
+            if (m.flags & EN_PASSANT) { epKey = ep; break; }
+    return PositionKey{sq, static_cast<uint8_t>(side), castling, epKey};
+}
+
 }  // namespace chess
