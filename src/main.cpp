@@ -12,6 +12,24 @@
 #ifdef __EMSCRIPTEN__
 #include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
+
+// emscripten's GLFW can report the cursor in CSS pixels while raylib works in canvas pixels
+// (HiDPI screens, browser zoom), which offsets picking. Track the pointer as a fraction of the
+// canvas in JS instead, so the result is independent of either scale.
+EM_JS(void, installPointerTracker, (), {
+    const canvas = Module.canvas;
+    Module.pointerU = 0;
+    Module.pointerV = 0;
+    const update = (e) => {
+        const r = canvas.getBoundingClientRect();
+        Module.pointerU = (e.clientX - r.left) / r.width;
+        Module.pointerV = (e.clientY - r.top) / r.height;
+    };
+    canvas.addEventListener('pointermove', update);
+    canvas.addEventListener('pointerdown', update);
+});
+EM_JS(float, pointerU, (), { return Module.pointerU; });
+EM_JS(float, pointerV, (), { return Module.pointerV; });
 #endif
 
 using namespace chess;
@@ -45,6 +63,14 @@ Color mix(Color a, Color b, float t) {
 }
 
 float wrapAngle(float a) { return atan2f(sinf(a), cosf(a)); }
+
+#ifdef __EMSCRIPTEN__
+Vector2 cursorPosition() {
+    return {pointerU() * GetScreenWidth(), pointerV() * GetScreenHeight()};
+}
+#else
+Vector2 cursorPosition() { return GetMousePosition(); }
+#endif
 
 class App {
 public:
@@ -176,7 +202,7 @@ private:
         }
 
         hovered_ = -1;
-        const Ray ray = GetScreenToWorldRay(GetMousePosition(), camera_);
+        const Ray ray = GetScreenToWorldRay(cursorPosition(), camera_);
         if (ray.direction.y < -1e-4f) {
             const float t = -ray.position.y / ray.direction.y;
             hovered_ = squareAt(Vector3Add(ray.position, Vector3Scale(ray.direction, t)));
@@ -315,6 +341,7 @@ int main() {
     InitWindow(1280, 800, "Chess 3D");
     app.init();
 #ifdef __EMSCRIPTEN__
+    installPointerTracker();
     emscripten_set_main_loop(frame, 0, 1);
 #else
     SetTargetFPS(144);
