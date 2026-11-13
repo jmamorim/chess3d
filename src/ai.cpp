@@ -145,6 +145,9 @@ void Searcher::start(const Position& root, std::vector<uint64_t> history, Search
     stack_.clear();
     haveResult_ = false;
     completedDepth_ = 0;
+    rootScores_.clear();
+    lastRootScores_.clear();
+    rootBest_ = -kInf;
 
     Frame rootFrame{root, root.legalMoves(), 0, 1, -kInf, kInf, 0, false};
     order(root, rootFrame.moves, 0);
@@ -165,6 +168,7 @@ bool Searcher::step(int sliceMs) {
                 // has already preferred is at least as good a choice.
                 if (stack_.front().index > 0) best_ = iterBest_;
                 running_ = false;
+                pickWithinMargin();
                 break;
             }
             if (now >= sliceEnd) break;
@@ -185,9 +189,20 @@ bool Searcher::step(int sliceMs) {
                 returnValue(f.beta);
                 continue;
             }
-            if (score > f.alpha) {
+            if (stack_.size() == 1 && limits_.marginCp > 0) {
+                // Keep the window open margin below the best, so near-best moves get exact scores.
+                if (score > f.alpha) rootScores_.emplace_back(m, score);
+                if (score > rootBest_) {
+                    rootBest_ = score;
+                    iterBest_ = m;
+                    f.alpha = std::max(f.alpha, rootBest_ - limits_.marginCp);
+                }
+            } else if (score > f.alpha) {
                 f.alpha = score;
-                if (stack_.size() == 1) iterBest_ = m;
+                if (stack_.size() == 1) {
+                    iterBest_ = m;
+                    rootBest_ = score;
+                }
             }
             ++f.index;
             continue;
@@ -251,9 +266,14 @@ void Searcher::finishIteration() {
     Frame& root = stack_.front();
     best_ = iterBest_;
     completedDepth_ = root.depth;
-    const bool mateFound = root.alpha > kMate - kMaxPly;
+    const bool mateFound = rootBest_ > kMate - kMaxPly;
+    lastRootScores_.swap(rootScores_);
+    lastRootBest_ = rootBest_;
+    rootScores_.clear();
+    rootBest_ = -kInf;
     if (root.depth >= limits_.maxDepth || mateFound || Clock::now() >= deadline_) {
         running_ = false;
+        pickWithinMargin();
         return;
     }
     // Search the best move first next time, so its score sets a tight bound early.
@@ -263,6 +283,22 @@ void Searcher::finishIteration() {
     root.index = 0;
     ++root.depth;
     root.alpha = -kInf;
+}
+
+// Picks among the last completed iteration's moves within the margin of its best, weighting each
+// by how close it came. A found mate is always played.
+void Searcher::pickWithinMargin() {
+    if (limits_.marginCp <= 0 || lastRootScores_.empty() || lastRootBest_ > kMate - kMaxPly) return;
+    std::vector<Move> moves;
+    std::vector<int> weights;
+    for (const auto& [move, score] : lastRootScores_) {
+        const int behind = lastRootBest_ - score;
+        if (behind > limits_.marginCp) continue;  // scored before a better move raised the bar
+        moves.push_back(move);
+        weights.push_back(limits_.marginCp - behind + 1);
+    }
+    std::discrete_distribution<size_t> pick(weights.begin(), weights.end());
+    best_ = moves[pick(rng_)];
 }
 
 bool Searcher::repeated(uint64_t h) const {

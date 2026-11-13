@@ -1,6 +1,8 @@
 #pragma once
 #include <chrono>
 #include <cstdint>
+#include <random>
+#include <utility>
 #include <vector>
 
 #include "chess.hpp"
@@ -10,6 +12,10 @@ namespace chess {
 struct SearchLimits {
     int maxDepth;
     int budgetMs;
+    // 0 = always play the best move. Otherwise play a random move scoring within this many
+    // centipawns of the best one (closer moves more likely), which is how the easier levels
+    // make human-sized mistakes.
+    int marginCp = 0;
 };
 
 // Alpha-beta search with an explicit stack instead of recursion, so it can stop at any node and
@@ -40,6 +46,7 @@ private:
     void enter(const Position& p, int depth, int alpha, int beta, int ply, bool quiesce);
     void returnValue(int value);
     void finishIteration();
+    void pickWithinMargin();
     bool repeated(uint64_t h) const;
     void order(const Position& p, std::vector<Move>& moves, int ply) const;
 
@@ -52,6 +59,10 @@ private:
     bool running_ = false;
     Move killers_[64][2]{};
     Move iterBest_{}, best_{};
+    // Root moves scored inside the margin, for the iteration in progress and the last completed one.
+    std::vector<std::pair<Move, int>> rootScores_, lastRootScores_;
+    int rootBest_ = 0, lastRootBest_ = 0;
+    std::mt19937 rng_{std::random_device{}()};
     int completedDepth_ = 0;
 };
 

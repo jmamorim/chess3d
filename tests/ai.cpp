@@ -24,9 +24,9 @@ Position mirrored(const Position& p) {
     return m;
 }
 
-Move think(const char* fen, int depth) {
+Move think(const char* fen, int depth, int marginCp = 0) {
     Searcher s;
-    s.start(Position::fromFen(fen), {}, SearchLimits{depth, 10000});
+    s.start(Position::fromFen(fen), {}, SearchLimits{depth, 10000, marginCp});
     while (!s.step(10)) {}
     return s.best();
 }
@@ -46,6 +46,22 @@ int main() {
     expect(is(think("4k3/8/8/3q4/8/8/8/3QK3 w - - 0 1", 3), 3, 35), "takes a hanging queen");
     // Same back-rank mate for black: Ra8-a1.
     expect(is(think("r5k1/8/8/8/8/8/5PPP/6K1 b - - 0 1", 3), 56, 0), "finds mate in one as black");
+
+    // The easier levels' margin still never skips a mate or a free queen, but does vary the moves.
+    bool alwaysMates = true, alwaysTakes = true;
+    for (int i = 0; i < 20; ++i) {
+        alwaysMates &= is(think("6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1", 3, 150), 0, 56);
+        alwaysTakes &= is(think("4k3/8/8/3q4/8/8/8/3QK3 w - - 0 1", 3, 150), 3, 35);
+    }
+    expect(alwaysMates, "with a margin it still plays mate in one");
+    expect(alwaysTakes, "with a margin it still takes a hanging queen");
+    {
+        const char* start = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        bool varied = false;
+        const Move first = think(start, 3, 60);
+        for (int i = 0; i < 20 && !varied; ++i) varied = !is(think(start, 3, 60), first.from, first.to);
+        expect(varied, "with a margin it varies its moves");
+    }
 
     // A time budget is respected even with no depth cap.
     {
