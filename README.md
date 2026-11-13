@@ -1,6 +1,6 @@
 # chess3d
 
-A 3D chess prototype in C++17 with [raylib](https://www.raylib.com/) 5.5. It is a hotseat game with the full rules: castling, en passant, promotion (always to a queen for now), check, checkmate and stalemate. The pieces are generated in code as lathe profiles plus boxes, so there are no asset files.
+A 3D chess prototype in C++17 with [raylib](https://www.raylib.com/) 5.5. It is a hotseat game with the full rules: castling, en passant, promotion (pick the piece from a 3D picker above the square), check, checkmate and stalemate. The pieces are generated in code as lathe profiles plus boxes, so there are no asset files.
 
 ## Build (desktop)
 
@@ -32,6 +32,7 @@ python3 -m http.server -d build-web   # open http://localhost:8000
 | Left click | select a piece / move it |
 | Right drag | orbit camera |
 | Wheel | zoom |
+| Esc | cancel the promotion picker |
 | U / Backspace | undo |
 | R | restart |
 | F | flip view |
@@ -47,4 +48,4 @@ python3 -m http.server -d build-web   # open http://localhost:8000
 
 ## Not yet
 
-Promotion piece choice, draw by repetition / 50-move rule / insufficient material, an AI opponent, sound, touch orbit controls.
+Draw by repetition / 50-move rule / insufficient material, an AI opponent, sound, touch orbit controls.

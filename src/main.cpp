@@ -37,6 +37,7 @@ using namespace chess;
 namespace {
 
 constexpr float kAnimSeconds = 0.3f;
+constexpr int8_t kPromoChoices[4] = {QUEEN, ROOK, BISHOP, KNIGHT};
 
 const Color kLightSquare{222, 202, 168, 255};
 const Color kDarkSquare{118, 84, 60, 255};
@@ -107,6 +108,7 @@ private:
     std::vector<Move> legal_;
     Status status_ = Status::Playing;
     int selected_ = -1, hovered_ = -1;
+    int promoTo_ = -1, promoHover_ = -1;  // promotion picker: target square (-1 = closed), hovered slot
     int animFrom_ = -1, animTo_ = -1;
     float animT_ = 1;
 
@@ -123,9 +125,14 @@ private:
         pos_ = Position::start();
         history_.clear();
         moves_.clear();
-        selected_ = -1;
+        clearSelection();
         animT_ = 1;
         refresh();
+    }
+
+    void clearSelection() {
+        selected_ = -1;
+        promoTo_ = -1;
     }
 
     void refresh() {
@@ -148,7 +155,7 @@ private:
         animFrom_ = m.from;
         animTo_ = m.to;
         animT_ = 0;
-        selected_ = -1;
+        clearSelection();
         refresh();
     }
 
@@ -157,18 +164,41 @@ private:
         pos_ = history_.back();
         history_.pop_back();
         moves_.pop_back();
-        selected_ = -1;
+        clearSelection();
         animT_ = 1;
         refresh();
     }
 
     bool ownPiece(int s) const { return s >= 0 && pos_.sq[s] != EMPTY && sideOf(pos_.sq[s]) == pos_.side; }
 
-    // The move from the selected square to `to`, auto-promoting to a queen.
-    const Move* findMove(int to) const {
+    const Move* findMove(int to, int8_t promo = EMPTY) const {
         for (const Move& m : legal_)
-            if (m.from == selected_ && m.to == to && (m.promo == EMPTY || m.promo == QUEEN)) return &m;
+            if (m.from == selected_ && m.to == to && m.promo == promo) return &m;
         return nullptr;
+    }
+
+    bool isPromotion(int to) const { return findMove(to, QUEEN) != nullptr; }
+    bool isTarget(int s) const { return selected_ >= 0 && (findMove(s) || isPromotion(s)); }
+
+    // Picker slots float in a row above the promotion square, laid out along the camera's right axis.
+    Vector3 promoSlot(int i) const {
+        const Vector3 right{cosf(yaw_), 0, -sinf(yaw_)};
+        Vector3 at = squareCenter(promoTo_);
+        at.y = 1.3f;
+        return Vector3Add(at, Vector3Scale(right, (i - 1.5f) * 0.95f));
+    }
+
+    int pickPromoSlot(const Ray& ray) const {
+        int best = -1;
+        float bestDist = 1e9f;
+        for (int i = 0; i < 4; ++i) {
+            const RayCollision hit = GetRayCollisionSphere(ray, Vector3Add(promoSlot(i), {0, 0.45f, 0}), 0.45f);
+            if (hit.hit && hit.distance < bestDist) {
+                best = i;
+                bestDist = hit.distance;
+            }
+        }
+        return best;
     }
 
     void update(float dt) {
@@ -202,16 +232,26 @@ private:
         }
 
         hovered_ = -1;
+        promoHover_ = -1;
         const Ray ray = GetScreenToWorldRay(cursorPosition(), camera_);
-        if (ray.direction.y < -1e-4f) {
+        if (promoTo_ >= 0) {
+            promoHover_ = pickPromoSlot(ray);
+        } else if (ray.direction.y < -1e-4f) {
             const float t = -ray.position.y / ray.direction.y;
             hovered_ = squareAt(Vector3Add(ray.position, Vector3Scale(ray.direction, t)));
         }
 
         const bool gameOver = status_ == Status::Checkmate || status_ == Status::Stalemate;
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !gameOver) {
+        const bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+        if (promoTo_ >= 0) {
+            // Esc or a click off the picker cancels; the pawn stays selected.
+            if (IsKeyPressed(KEY_ESCAPE) || (click && promoHover_ < 0)) promoTo_ = -1;
+            else if (click) play(*findMove(promoTo_, kPromoChoices[promoHover_]));
+        } else if (click && !gameOver) {
             if (hovered_ < 0) {
                 selected_ = -1;
+            } else if (isPromotion(hovered_)) {
+                promoTo_ = hovered_;
             } else if (const Move* m = selected_ >= 0 ? findMove(hovered_) : nullptr) {
                 play(*m);
             } else if (ownPiece(hovered_) && hovered_ != selected_) {
@@ -236,11 +276,10 @@ private:
     Color squareColor(int s) const {
         Color c = (fileOf(s) + rankOf(s)) % 2 == 0 ? kDarkSquare : kLightSquare;
         if (!moves_.empty() && (s == moves_.back().from || s == moves_.back().to)) c = mix(c, kLastMove, 0.45f);
-        if (s == selected_) c = mix(c, kSelect, 0.6f);
+        if (s == selected_ || s == promoTo_) c = mix(c, kSelect, 0.6f);
         if ((status_ == Status::Check || status_ == Status::Checkmate) && s == pos_.kingSquare(pos_.side))
             c = mix(c, kCheck, 0.65f);
-        const bool interactive = ownPiece(s) || (selected_ >= 0 && findMove(s));
-        if (s == hovered_ && interactive) c = mix(c, WHITE, 0.25f);
+        if (s == hovered_ && (ownPiece(s) || isTarget(s))) c = mix(c, WHITE, 0.25f);
         return c;
     }
 
@@ -251,8 +290,9 @@ private:
             Vector3 c = squareCenter(s);
             drawMesh(pieces_.cube(), box({1, 0.2f, 1}, {c.x, -0.1f, c.z}), squareColor(s));
         }
-        if (selected_ < 0) return;
+        if (selected_ < 0 || promoTo_ >= 0) return;
         for (const Move& m : legal_) {
+            // A promotion appears four times (one per piece); mark its square once.
             if (m.from != selected_ || (m.promo != EMPTY && m.promo != QUEEN)) continue;
             Vector3 c = squareCenter(m.to);
             const bool capture = m.flags & CAPTURE;
@@ -272,10 +312,25 @@ private:
                 at.y += sinf(PI * e) * (typeOf(p) == KNIGHT ? 0.6f : 0.15f);
             }
             if (s == selected_) at.y += 0.12f;
-            const Matrix world = MatrixMultiply(MatrixRotateY(p > 0 ? 0.0f : PI), MatrixTranslate(at.x, at.y, at.z));
-            const Color c = p > 0 ? kWhitePiece : kBlackPiece;
-            for (const PiecePart& part : pieces_.parts(typeOf(p)))
-                drawMesh(part.mesh, MatrixMultiply(part.local, world), c);
+            drawPiece(typeOf(p), at, p > 0 ? 0.0f : PI, p > 0 ? kWhitePiece : kBlackPiece);
+        }
+    }
+
+    void drawPiece(int type, Vector3 at, float rotY, Color c) {
+        const Matrix world = MatrixMultiply(MatrixRotateY(rotY), MatrixTranslate(at.x, at.y, at.z));
+        for (const PiecePart& part : pieces_.parts(type)) drawMesh(part.mesh, MatrixMultiply(part.local, world), c);
+    }
+
+    void drawPromotionPicker() {
+        if (promoTo_ < 0) return;
+        const Color base = pos_.side == White ? kWhitePiece : kBlackPiece;
+        for (int i = 0; i < 4; ++i) {
+            const bool hot = i == promoHover_;
+            Vector3 at = promoSlot(i);
+            drawMesh(pieces_.disc(), box({0.4f, 0.04f, 0.4f}, {at.x, at.y - 0.04f, at.z}), hot ? kSelect : kFrame);
+            if (hot) at.y += 0.12f;
+            // yaw + 90 degrees turns the knight side-on to the camera.
+            drawPiece(kPromoChoices[i], at, yaw_ + PI / 2, hot ? mix(base, kSelect, 0.3f) : base);
         }
     }
 
@@ -311,6 +366,8 @@ private:
         DrawRectangle(12, 12, MeasureText(text, 28) + 24, 44, Fade(BLACK, 0.55f));
         DrawText(text, 24, 20, 28, color);
         DrawText(TextFormat("Move %d", static_cast<int>(moves_.size()) / 2 + 1), 24, 62, 18, Fade(RAYWHITE, 0.6f));
+        if (promoTo_ >= 0)
+            DrawText("Choose a promotion piece  (Esc or click elsewhere to cancel)", 12, GetScreenHeight() - 56, 18, kSelect);
 
         const char* help = TextFormat("LMB select/move   RMB drag orbit   Wheel zoom   U undo   R restart   F flip   A auto-rotate [%s]",
                                       autoRotate_ ? "on" : "off");
@@ -324,6 +381,7 @@ private:
         BeginMode3D(camera_);
         drawBoard();
         drawPieces();
+        drawPromotionPicker();
         EndMode3D();
         drawLabels();
         drawHud();
@@ -339,6 +397,7 @@ void frame() { app.frame(); }
 int main() {
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
     InitWindow(1280, 800, "Chess 3D");
+    SetExitKey(KEY_NULL);  // Esc cancels the promotion picker instead of quitting
     app.init();
 #ifdef __EMSCRIPTEN__
     installPointerTracker();
