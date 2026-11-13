@@ -1,13 +1,17 @@
-// 3D chess prototype: hotseat or vs-AI play with full rules, orbit camera, click-to-move.
+// 3D chess prototype: hotseat, vs-AI or online play with full rules, orbit camera, click-to-move.
 #include <raylib.h>
 #include <raymath.h>
 
-#include <array>
+#include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #include "ai.hpp"
 #include "chess.hpp"
+#include "net.hpp"
 #include "pieces.hpp"
 #include "shaders.hpp"
 
@@ -48,7 +52,8 @@ struct Level {
 };
 constexpr Level kLevels[3] = {{"Easy", {2, 300}}, {"Medium", {4, 600}}, {"Hard", {64, 1500}}};
 
-enum MenuId { kLevelEasy, kLevelMedium, kLevelHard, kHotseat, kPlayWhite, kPlayBlack, kPlayRandom };
+enum MenuId { kLevelEasy, kLevelMedium, kLevelHard, kHotseat, kPlayWhite, kPlayBlack, kPlayRandom, kCreateRoom, kJoinRoom };
+constexpr int kCodeLength = 4;
 struct Button {
     Rectangle rect;
     const char* label;
@@ -105,6 +110,9 @@ public:
         camera_.fovy = 45;
         camera_.projection = CAMERA_PERSPECTIVE;
         reset();
+        // Opening a room link (…/#CODE) skips the menu and joins or resumes that room.
+        const std::string code = net::urlCode();
+        if (net::available() && code.size() == kCodeLength) openRoom(code);
     }
 
     void shutdown() {
@@ -140,12 +148,22 @@ private:
     Searcher searcher_;
     bool aiStarted_ = false;
 
+    // Online play (web only). The room code is also the page's #fragment, so the URL is the invite.
+    enum class Link { Waiting, Connected, Disconnected };
+    bool online_ = false, isHost_ = false;
+    bool seated_ = false;  // a guest learns its side from the host's first sync
+    Link link_ = Link::Waiting;
+    std::string room_, netError_;
+    bool typingCode_ = false;
+    std::string codeInput_;
+
     Shader shader_{};
     int viewPosLoc_ = -1;
     Material material_{};
     PieceSet pieces_;
 
     void newGame(int mode) {
+        leaveRoom();
         vsAi_ = mode != kHotseat;
         human_ = mode == kPlayBlack || (mode == kPlayRandom && GetRandomValue(0, 1)) ? Black : White;
         menuOpen_ = false;
@@ -184,7 +202,7 @@ private:
     }
 
     void faceSideToMove() {
-        const Side view = vsAi_ ? human_ : pos_.side;
+        const Side view = vsAi_ || (online_ && seated_) ? human_ : pos_.side;
         const float want = view == White ? 0.0f : PI;
         targetYaw_ = yaw_ + wrapAngle(want - yaw_);
     }
@@ -214,6 +232,150 @@ private:
     }
 
     bool aiTurn() const { return vsAi_ && pos_.side != human_ && !gameOver() && !menuOpen_; }
+    // True when clicks on the board should do nothing: the AI or the online opponent is to move.
+    bool inputLocked() const { return aiTurn() || (online_ && (!seated_ || pos_.side != human_)); }
+
+    // A move made by the local player; online it also goes to the opponent.
+    void commit(const Move& m) {
+        play(m);
+        if (!online_) return;
+        net::send("move " + std::to_string(moves_.size() - 1) + " " + toUci(m));
+        saveRoom();
+    }
+
+    std::string moveList() const {
+        std::string s;
+        for (const Move& m : moves_) s += " " + toUci(m);
+        return s;
+    }
+
+    // Replays `uci` moves from the start position; stops at the first one that is not legal.
+    void replay(const std::vector<std::string>& uci) {
+        reset();
+        for (const std::string& u : uci) {
+            const Move m = pos_.parseUci(u);
+            if (m.from < 0) break;
+            play(m);
+        }
+        animT_ = 1;
+    }
+
+    // Stored per room: "<host|guest> <w|b|-> <moves...>", so a reload can resume the game.
+    void saveRoom() const {
+        const char side = !seated_ ? '-' : human_ == White ? 'w' : 'b';
+        net::save("chess3d:" + room_, std::string(isHost_ ? "host " : "guest ") + side + moveList());
+    }
+
+    void enterRoom(const std::string& code) {
+        vsAi_ = false;
+        online_ = true;
+        room_ = code;
+        link_ = Link::Waiting;
+        netError_.clear();
+        menuOpen_ = typingCode_ = false;
+        gameStarted_ = true;
+        net::setUrlCode(code);
+    }
+
+    void createRoom() {
+        leaveRoom();
+        enterRoom(net::newCode());
+        isHost_ = seated_ = true;
+        human_ = GetRandomValue(0, 1) ? Black : White;
+        reset();
+        faceSideToMove();
+        saveRoom();
+        net::host(room_, false);
+    }
+
+    // Opens a room from a link or typed code: resumes our seat if this browser was in it before.
+    void openRoom(const std::string& code) {
+        leaveRoom();
+        enterRoom(code);
+        std::istringstream in(net::load("chess3d:" + code));
+        std::string role, side, u;
+        in >> role >> side;
+        std::vector<std::string> moves;
+        while (in >> u) moves.push_back(u);
+        isHost_ = role == "host";
+        seated_ = side == "w" || side == "b";
+        human_ = side == "b" ? Black : White;
+        replay(moves);
+        faceSideToMove();
+        if (isHost_) net::host(code, true);
+        else net::join(code);
+    }
+
+    void leaveRoom() {
+        if (!online_) return;
+        net::leave();
+        net::setUrlCode("");
+        online_ = isHost_ = seated_ = false;
+    }
+
+    void sendSync() {
+        const char* side = !isHost_ ? "-" : human_ == White ? "w" : "b";
+        net::send(std::string("sync ") + side + moveList());
+    }
+
+    // Both sides send "sync <host side|-> <moves>" on connect and keep the longer history when the
+    // shorter one is a prefix of it; if the histories disagree, the host's wins.
+    void onSync(std::istringstream& in) {
+        std::string side, u;
+        in >> side;
+        std::vector<std::string> theirs;
+        while (in >> u) theirs.push_back(u);
+        if (!isHost_) {
+            human_ = side == "w" ? Black : White;
+            seated_ = true;
+        }
+        std::vector<std::string> ours;
+        for (const Move& m : moves_) ours.push_back(toUci(m));
+        const bool prefix = std::equal(ours.begin(), ours.begin() + std::min(ours.size(), theirs.size()), theirs.begin());
+        if ((prefix && theirs.size() > ours.size()) || (!prefix && !isHost_)) replay(theirs);
+        faceSideToMove();
+        saveRoom();
+    }
+
+    void pollNet() {
+        std::string line;
+        while (online_ && net::poll(line)) {
+            std::istringstream in(line);
+            std::string kind;
+            in >> kind;
+            if (kind == "@waiting") {
+                if (link_ != Link::Connected) link_ = Link::Waiting;
+            } else if (kind == "@connected") {
+                link_ = Link::Connected;
+                netError_.clear();
+                sendSync();
+            } else if (kind == "@disconnected") {
+                link_ = Link::Disconnected;
+            } else if (kind == "@error") {
+                in >> netError_;
+                // Someone else holds this code: pick another one for a brand-new room.
+                if (netError_ == "unavailable-id" && isHost_ && moves_.empty()) createRoom();
+            } else if (kind == "full") {
+                leaveRoom();
+                menuOpen_ = true;
+                netError_ = "That room already has two players";
+            } else if (kind == "sync") {
+                onSync(in);
+            } else if (kind == "move") {
+                int ply = -1;
+                std::string u;
+                in >> ply >> u;
+                const Move m = pos_.parseUci(u);
+                if (ply == static_cast<int>(moves_.size()) && seated_ && pos_.side != human_ && m.from >= 0) {
+                    clearSelection();
+                    play(m);
+                    saveRoom();
+                }
+            } else if (kind == "claim") {
+                if (reps_ >= 3) status_ = Status::Repetition;
+            }
+        }
+    }
 
     void updateAi() {
         if (!aiTurn()) return;
@@ -228,12 +390,12 @@ private:
         if (!searcher_.running() && animT_ >= 1) play(searcher_.best());
     }
 
-    std::array<Button, 7> menuButtons() const {
+    std::vector<Button> menuButtons() const {
         const float cx = GetScreenWidth() / 2.0f, cy = GetScreenHeight() / 2.0f;
         const float gap = 12, h = 44;
         const float w = fminf(140, (GetScreenWidth() - 32 - 3 * gap) / 4);  // four buttons fit a phone-width window
         auto row = [&](int i, int n, float y) { return Rectangle{cx - (n * w + (n - 1) * gap) / 2 + i * (w + gap), y, w, h}; };
-        return {{
+        std::vector<Button> b = {
             {row(0, 3, cy - 40), kLevels[0].name, kLevelEasy},
             {row(1, 3, cy - 40), kLevels[1].name, kLevelMedium},
             {row(2, 3, cy - 40), kLevels[2].name, kLevelHard},
@@ -241,10 +403,31 @@ private:
             {row(1, 4, cy + 50), "Play White", kPlayWhite},
             {row(2, 4, cy + 50), "Play Black", kPlayBlack},
             {row(3, 4, cy + 50), "Random", kPlayRandom},
-        }};
+        };
+        if (net::available()) {
+            b.push_back({row(0, 2, cy + 150), "Create room", kCreateRoom});
+            b.push_back({row(1, 2, cy + 150), "Join room", kJoinRoom});
+        }
+        return b;
+    }
+
+    void updateCodeInput() {
+        if (IsKeyPressed(KEY_ESCAPE)) {
+            typingCode_ = false;
+            return;
+        }
+        if (IsKeyPressed(KEY_BACKSPACE) && !codeInput_.empty()) codeInput_.pop_back();
+        for (int c = GetCharPressed(); c; c = GetCharPressed())
+            if (c < 128 && std::isalnum(c) && codeInput_.size() < kCodeLength)
+                codeInput_ += static_cast<char>(std::toupper(c));
+        if (IsKeyPressed(KEY_ENTER) && codeInput_.size() == kCodeLength) openRoom(codeInput_);
     }
 
     void updateMenu() {
+        if (typingCode_) {
+            updateCodeInput();
+            return;
+        }
         if (IsKeyPressed(KEY_ESCAPE) && gameStarted_) {
             menuOpen_ = false;
             return;
@@ -253,14 +436,19 @@ private:
         for (const Button& b : menuButtons()) {
             if (!CheckCollisionPointRec(cursorPosition(), b.rect)) continue;
             if (b.id <= kLevelHard) level_ = b.id;
-            else newGame(b.id);
+            else if (b.id == kCreateRoom) createRoom();
+            else if (b.id == kJoinRoom) {
+                typingCode_ = true;
+                codeInput_.clear();
+                netError_.clear();
+            } else newGame(b.id);
         }
     }
 
     bool gameOver() const {
         return status_ == Status::Checkmate || status_ == Status::Stalemate || status_ == Status::Repetition;
     }
-    bool canClaimDraw() const { return !gameOver() && !aiTurn() && reps_ >= 3; }
+    bool canClaimDraw() const { return !gameOver() && !inputLocked() && reps_ >= 3; }
 
     bool ownPiece(int s) const { return s >= 0 && pos_.sq[s] != EMPTY && sideOf(pos_.sq[s]) == pos_.side; }
 
@@ -318,6 +506,7 @@ private:
 
         hovered_ = -1;
         promoHover_ = -1;
+        pollNet();
         if (menuOpen_) {
             updateMenu();
             return;
@@ -327,11 +516,13 @@ private:
             clearSelection();
             return;
         }
-        if (IsKeyPressed(KEY_U) || IsKeyPressed(KEY_BACKSPACE)) undo();
+        if ((IsKeyPressed(KEY_U) || IsKeyPressed(KEY_BACKSPACE)) && !online_) undo();  // no take-backs online
+        if (IsKeyPressed(KEY_C) && online_) net::copyLink();
         if (IsKeyPressed(KEY_F)) targetYaw_ += PI;
         if (IsKeyPressed(KEY_D) && canClaimDraw()) {
             clearSelection();
             status_ = Status::Repetition;
+            if (online_) net::send("claim");
         }
         if (IsKeyPressed(KEY_A)) {
             autoRotate_ = !autoRotate_;
@@ -340,7 +531,7 @@ private:
 
         if (animT_ < 1) animT_ = fminf(1.0f, animT_ + dt / kAnimSeconds);
         updateAi();
-        if (aiTurn()) return;
+        if (inputLocked()) return;
 
         const Ray ray = GetScreenToWorldRay(cursorPosition(), camera_);
         if (promoTo_ >= 0) {
@@ -354,14 +545,14 @@ private:
         if (promoTo_ >= 0) {
             // Esc or a click off the picker cancels; the pawn stays selected.
             if (IsKeyPressed(KEY_ESCAPE) || (click && promoHover_ < 0)) promoTo_ = -1;
-            else if (click) play(*findMove(promoTo_, kPromoChoices[promoHover_]));
+            else if (click) commit(*findMove(promoTo_, kPromoChoices[promoHover_]));
         } else if (click && !gameOver()) {
             if (hovered_ < 0) {
                 selected_ = -1;
             } else if (isPromotion(hovered_)) {
                 promoTo_ = hovered_;
             } else if (const Move* m = selected_ >= 0 ? findMove(hovered_) : nullptr) {
-                play(*m);
+                commit(*m);
             } else if (ownPiece(hovered_) && hovered_ != selected_) {
                 selected_ = hovered_;
             } else {
@@ -478,15 +669,22 @@ private:
         const int moveNo = static_cast<int>(moves_.size()) / 2 + 1;
         const char* sub = vsAi_ ? TextFormat("Move %d   vs AI (%s)%s", moveNo, kLevels[level_].name,
                                              aiTurn() ? "   thinking..." : "")
-                                : TextFormat("Move %d   hotseat", moveNo);
+                          : online_ ? TextFormat("Move %d   Room %s   %s   %s   C copy link", moveNo, room_.c_str(),
+                                                 !seated_ ? "joining..." : human_ == White ? "you play White" : "you play Black",
+                                                 link_ == Link::Connected ? "connected"
+                                                 : link_ == Link::Disconnected ? "opponent disconnected"
+                                                                               : "waiting for opponent")
+                                    : TextFormat("Move %d   hotseat", moveNo);
         DrawText(sub, 24, 62, 18, Fade(RAYWHITE, 0.6f));
+        if (online_ && !netError_.empty())
+            DrawText(TextFormat("Network error: %s", netError_.c_str()), 24, 86, 18, kCheck);
         if (promoTo_ >= 0)
             DrawText("Choose a promotion piece  (Esc or click elsewhere to cancel)", 12, GetScreenHeight() - 56, 18, kSelect);
         else if (canClaimDraw())
             DrawText("Threefold repetition - press D to claim a draw", 12, GetScreenHeight() - 56, 18, kSelect);
 
-        const char* help = TextFormat("LMB select/move   RMB drag orbit   Wheel zoom   U undo   R new game   F flip   A auto-rotate [%s]",
-                                      autoRotate_ ? "on" : "off");
+        const char* help = TextFormat("LMB select/move   RMB drag orbit   Wheel zoom   %sR new game   F flip   A auto-rotate [%s]",
+                                      online_ ? "" : "U undo   ", autoRotate_ ? "on" : "off");
         DrawText(help, 12, GetScreenHeight() - 28, 16, Fade(RAYWHITE, 0.55f));
     }
 
@@ -509,7 +707,23 @@ private:
             DrawText(b.label, static_cast<int>(b.rect.x + (b.rect.width - MeasureText(b.label, 20)) / 2),
                      static_cast<int>(b.rect.y + 12), 20, text);
         }
-        if (gameStarted_) centered("Esc to return to the game", buttons[3].rect.y + 70, 18, Fade(RAYWHITE, 0.55f));
+        if (buttons.size() > kJoinRoom) centered("Online", buttons[kCreateRoom].rect.y - 30, 20, Fade(RAYWHITE, 0.7f));
+        const float below = buttons.back().rect.y + buttons.back().rect.height;
+        if (!netError_.empty() && !online_) centered(netError_.c_str(), below + 16, 18, kCheck);
+        if (gameStarted_) centered("Esc to return to the game", below + 44, 18, Fade(RAYWHITE, 0.55f));
+        if (typingCode_) drawCodeInput();
+    }
+
+    void drawCodeInput() {
+        const int w = GetScreenWidth(), h = GetScreenHeight();
+        DrawRectangle(0, 0, w, h, Fade(BLACK, 0.6f));
+        std::string shown = codeInput_;
+        shown.resize(kCodeLength, '_');
+        const char* title = "Enter room code";
+        DrawText(title, (w - MeasureText(title, 24)) / 2, h / 2 - 70, 24, RAYWHITE);
+        DrawText(shown.c_str(), (w - MeasureText(shown.c_str(), 56)) / 2, h / 2 - 28, 56, kSelect);
+        const char* hint = "Enter to join   Esc to cancel";
+        DrawText(hint, (w - MeasureText(hint, 18)) / 2, h / 2 + 44, 18, Fade(RAYWHITE, 0.55f));
     }
 
     void draw() {

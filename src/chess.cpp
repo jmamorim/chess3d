@@ -213,6 +213,19 @@ std::vector<Move> Position::legalMoves() const {
     return legal;
 }
 
+std::string toUci(const Move& m) {
+    std::string s = {static_cast<char>('a' + fileOf(m.from)), static_cast<char>('1' + rankOf(m.from)),
+                     static_cast<char>('a' + fileOf(m.to)), static_cast<char>('1' + rankOf(m.to))};
+    if (m.promo) s += " pnbrqk"[m.promo];
+    return s;
+}
+
+Move Position::parseUci(const std::string& uci) const {
+    for (const Move& m : legalMoves())
+        if (toUci(m) == uci) return m;
+    return Move{};
+}
+
 PositionKey Position::key() const {
     int8_t epKey = -1;
     if (ep >= 0)

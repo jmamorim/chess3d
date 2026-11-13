@@ -51,6 +51,19 @@ int main() {
     expect(!(start.key() == Position::fromFen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1").key()),
            "side to move is part of the key");
 
+    // UCI text, used by online play: every legal move round-trips, and garbage is rejected.
+    const Position kiwi = Position::fromFen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+    bool roundTrip = true;
+    for (const Move& m : kiwi.legalMoves()) {
+        const Move back = kiwi.parseUci(toUci(m));
+        roundTrip &= back.from == m.from && back.to == m.to && back.promo == m.promo && back.flags == m.flags;
+    }
+    expect(roundTrip, "every legal move round-trips through UCI");
+    expect(toUci(play(start, 12, 28).parseUci("e7e5")) == "e7e5", "parses a black reply");
+    expect(start.parseUci("e2e5").from < 0 && start.parseUci("zz").from < 0, "rejects illegal or malformed UCI");
+    const Position promo = Position::fromFen("8/4P3/8/8/8/8/k7/4K3 w - - 0 1");
+    expect(promo.parseUci("e7e8n").promo == KNIGHT && promo.parseUci("e7e8").from < 0, "promotion needs its piece letter");
+
     std::printf(failures ? "%d failure(s)\n" : "all passed\n", failures);
     return failures ? 1 : 0;
 }

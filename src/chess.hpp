@@ -32,6 +32,8 @@ struct PositionKey {
     }
 };
 
+std::string toUci(const Move& m);
+
 // Square index = rank * 8 + file; rank 0 is white's back rank, file 0 is the a-file.
 inline int fileOf(int s) { return s & 7; }
 inline int rankOf(int s) { return s >> 3; }
@@ -53,6 +55,8 @@ struct Position {
     bool inCheck(Side c) const;
     int kingSquare(Side c) const;
     PositionKey key() const;
+    // Finds the legal move written in UCI notation ("e2e4", "e7e8q"); from = -1 when there is none.
+    Move parseUci(const std::string& uci) const;
 
 private:
     void pseudoMoves(std::vector<Move>& out) const;

@@ -24,7 +24,7 @@ if(EMSCRIPTEN)
   set(CMAKE_EXECUTABLE_SUFFIX ".html")
 endif()
 
-add_executable(chess3d src/main.cpp src/pieces.cpp)
+add_executable(chess3d src/main.cpp src/pieces.cpp src/net.cpp)
 target_link_libraries(chess3d PRIVATE chess raylib)
 
 if(EMSCRIPTEN)
@@ -32,7 +32,7 @@ if(EMSCRIPTEN)
   target_link_options(chess3d PRIVATE
     -sUSE_GLFW=3
     -sALLOW_MEMORY_GROWTH=1
-    --shell-file ${CMAKE_SOURCE_DIR}/web/shell.html)
+    --shell-file ${CMAKE_SOURCE_DIR}/web/shell.html --pre-js ${CMAKE_SOURCE_DIR}/web/net.js)
 else()
   enable_testing()
   add_executable(perft tests/perft.cpp)
