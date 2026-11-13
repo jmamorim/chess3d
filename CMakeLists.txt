@@ -17,7 +17,7 @@ FetchContent_Declare(raylib
 FetchContent_MakeAvailable(raylib)
 
 # Chess rules have no raylib dependency so they can be tested headless.
-add_library(chess STATIC src/chess.cpp)
+add_library(chess STATIC src/chess.cpp src/ai.cpp)
 target_include_directories(chess PUBLIC src)
 
 if(EMSCRIPTEN)
@@ -41,4 +41,7 @@ else()
   add_executable(rules tests/rules.cpp)
   target_link_libraries(rules PRIVATE chess)
   add_test(NAME rules COMMAND rules)
+  add_executable(ai_test tests/ai.cpp)
+  target_link_libraries(ai_test PRIVATE chess)
+  add_test(NAME ai COMMAND ai_test)
 endif()

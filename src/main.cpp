@@ -1,10 +1,12 @@
-// 3D chess prototype: hotseat play with full rules, orbit camera, click-to-move.
+// 3D chess prototype: hotseat or vs-AI play with full rules, orbit camera, click-to-move.
 #include <raylib.h>
 #include <raymath.h>
 
+#include <array>
 #include <cmath>
 #include <vector>
 
+#include "ai.hpp"
 #include "chess.hpp"
 #include "pieces.hpp"
 #include "shaders.hpp"
@@ -38,6 +40,20 @@ namespace {
 
 constexpr float kAnimSeconds = 0.3f;
 constexpr int8_t kPromoChoices[4] = {QUEEN, ROOK, BISHOP, KNIGHT};
+constexpr int kAiSliceMs = 8;  // engine time per frame, so rendering stays smooth while it thinks
+
+struct Level {
+    const char* name;
+    SearchLimits limits;
+};
+constexpr Level kLevels[3] = {{"Easy", {2, 300}}, {"Medium", {4, 600}}, {"Hard", {64, 1500}}};
+
+enum MenuId { kLevelEasy, kLevelMedium, kLevelHard, kHotseat, kPlayWhite, kPlayBlack, kPlayRandom };
+struct Button {
+    Rectangle rect;
+    const char* label;
+    int id;
+};
 
 const Color kLightSquare{222, 202, 168, 255};
 const Color kDarkSquare{118, 84, 60, 255};
@@ -117,10 +133,26 @@ private:
     float yaw_ = 0, targetYaw_ = 0, pitch_ = 0.85f, dist_ = 11.5f;
     bool autoRotate_ = true;
 
+    bool vsAi_ = false;
+    Side human_ = White;
+    int level_ = 1;
+    bool menuOpen_ = true, gameStarted_ = false;
+    Searcher searcher_;
+    bool aiStarted_ = false;
+
     Shader shader_{};
     int viewPosLoc_ = -1;
     Material material_{};
     PieceSet pieces_;
+
+    void newGame(int mode) {
+        vsAi_ = mode != kHotseat;
+        human_ = mode == kPlayBlack || (mode == kPlayRandom && GetRandomValue(0, 1)) ? Black : White;
+        menuOpen_ = false;
+        gameStarted_ = true;
+        reset();
+        faceSideToMove();
+    }
 
     void reset() {
         pos_ = Position::start();
@@ -146,11 +178,14 @@ private:
         for (const Position& p : history_) reps_ += p.key() == key;
         // FIDE 9.6.1: the fifth occurrence ends the game without a claim.
         if (!gameOver() && reps_ >= 5) status_ = Status::Repetition;
+        searcher_.cancel();
+        aiStarted_ = false;
         if (autoRotate_) faceSideToMove();
     }
 
     void faceSideToMove() {
-        const float want = pos_.side == White ? 0.0f : PI;
+        const Side view = vsAi_ ? human_ : pos_.side;
+        const float want = view == White ? 0.0f : PI;
         targetYaw_ = yaw_ + wrapAngle(want - yaw_);
     }
 
@@ -167,18 +202,65 @@ private:
 
     void undo() {
         if (history_.empty()) return;
-        pos_ = history_.back();
-        history_.pop_back();
-        moves_.pop_back();
+        // Against the AI, take back the AI's reply too, so it is the player's move again.
+        do {
+            pos_ = history_.back();
+            history_.pop_back();
+            moves_.pop_back();
+        } while (vsAi_ && pos_.side != human_ && !history_.empty());
         clearSelection();
         animT_ = 1;
         refresh();
     }
 
+    bool aiTurn() const { return vsAi_ && pos_.side != human_ && !gameOver() && !menuOpen_; }
+
+    void updateAi() {
+        if (!aiTurn()) return;
+        if (!aiStarted_) {
+            std::vector<uint64_t> hashes;
+            for (const Position& p : history_) hashes.push_back(hashOf(p));
+            searcher_.start(pos_, std::move(hashes), kLevels[level_].limits);
+            aiStarted_ = true;
+        }
+        if (searcher_.running()) searcher_.step(kAiSliceMs);
+        // Let the player's move finish animating before the reply starts.
+        if (!searcher_.running() && animT_ >= 1) play(searcher_.best());
+    }
+
+    std::array<Button, 7> menuButtons() const {
+        const float cx = GetScreenWidth() / 2.0f, cy = GetScreenHeight() / 2.0f;
+        const float gap = 12, h = 44;
+        const float w = fminf(140, (GetScreenWidth() - 32 - 3 * gap) / 4);  // four buttons fit a phone-width window
+        auto row = [&](int i, int n, float y) { return Rectangle{cx - (n * w + (n - 1) * gap) / 2 + i * (w + gap), y, w, h}; };
+        return {{
+            {row(0, 3, cy - 40), kLevels[0].name, kLevelEasy},
+            {row(1, 3, cy - 40), kLevels[1].name, kLevelMedium},
+            {row(2, 3, cy - 40), kLevels[2].name, kLevelHard},
+            {row(0, 4, cy + 50), "Hotseat", kHotseat},
+            {row(1, 4, cy + 50), "Play White", kPlayWhite},
+            {row(2, 4, cy + 50), "Play Black", kPlayBlack},
+            {row(3, 4, cy + 50), "Random", kPlayRandom},
+        }};
+    }
+
+    void updateMenu() {
+        if (IsKeyPressed(KEY_ESCAPE) && gameStarted_) {
+            menuOpen_ = false;
+            return;
+        }
+        if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return;
+        for (const Button& b : menuButtons()) {
+            if (!CheckCollisionPointRec(cursorPosition(), b.rect)) continue;
+            if (b.id <= kLevelHard) level_ = b.id;
+            else newGame(b.id);
+        }
+    }
+
     bool gameOver() const {
         return status_ == Status::Checkmate || status_ == Status::Stalemate || status_ == Status::Repetition;
     }
-    bool canClaimDraw() const { return !gameOver() && reps_ >= 3; }
+    bool canClaimDraw() const { return !gameOver() && !aiTurn() && reps_ >= 3; }
 
     bool ownPiece(int s) const { return s >= 0 && pos_.sq[s] != EMPTY && sideOf(pos_.sq[s]) == pos_.side; }
 
@@ -234,7 +316,17 @@ private:
         const float d = dist_ * fmaxf(1.0f, 1.3f / aspect);
         camera_.position = {d * cosf(pitch_) * sinf(yaw_), d * sinf(pitch_), d * cosf(pitch_) * cosf(yaw_)};
 
-        if (IsKeyPressed(KEY_R)) reset();
+        hovered_ = -1;
+        promoHover_ = -1;
+        if (menuOpen_) {
+            updateMenu();
+            return;
+        }
+        if (IsKeyPressed(KEY_R)) {
+            menuOpen_ = true;
+            clearSelection();
+            return;
+        }
         if (IsKeyPressed(KEY_U) || IsKeyPressed(KEY_BACKSPACE)) undo();
         if (IsKeyPressed(KEY_F)) targetYaw_ += PI;
         if (IsKeyPressed(KEY_D) && canClaimDraw()) {
@@ -246,8 +338,10 @@ private:
             if (autoRotate_) faceSideToMove();
         }
 
-        hovered_ = -1;
-        promoHover_ = -1;
+        if (animT_ < 1) animT_ = fminf(1.0f, animT_ + dt / kAnimSeconds);
+        updateAi();
+        if (aiTurn()) return;
+
         const Ray ray = GetScreenToWorldRay(cursorPosition(), camera_);
         if (promoTo_ >= 0) {
             promoHover_ = pickPromoSlot(ray);
@@ -274,8 +368,6 @@ private:
                 selected_ = -1;
             }
         }
-
-        if (animT_ < 1) animT_ = fminf(1.0f, animT_ + dt / kAnimSeconds);
     }
 
     void drawMesh(Mesh mesh, Matrix transform, Color c) {
@@ -383,15 +475,41 @@ private:
         }
         DrawRectangle(12, 12, MeasureText(text, 28) + 24, 44, Fade(BLACK, 0.55f));
         DrawText(text, 24, 20, 28, color);
-        DrawText(TextFormat("Move %d", static_cast<int>(moves_.size()) / 2 + 1), 24, 62, 18, Fade(RAYWHITE, 0.6f));
+        const int moveNo = static_cast<int>(moves_.size()) / 2 + 1;
+        const char* sub = vsAi_ ? TextFormat("Move %d   vs AI (%s)%s", moveNo, kLevels[level_].name,
+                                             aiTurn() ? "   thinking..." : "")
+                                : TextFormat("Move %d   hotseat", moveNo);
+        DrawText(sub, 24, 62, 18, Fade(RAYWHITE, 0.6f));
         if (promoTo_ >= 0)
             DrawText("Choose a promotion piece  (Esc or click elsewhere to cancel)", 12, GetScreenHeight() - 56, 18, kSelect);
         else if (canClaimDraw())
             DrawText("Threefold repetition - press D to claim a draw", 12, GetScreenHeight() - 56, 18, kSelect);
 
-        const char* help = TextFormat("LMB select/move   RMB drag orbit   Wheel zoom   U undo   R restart   F flip   A auto-rotate [%s]",
+        const char* help = TextFormat("LMB select/move   RMB drag orbit   Wheel zoom   U undo   R new game   F flip   A auto-rotate [%s]",
                                       autoRotate_ ? "on" : "off");
         DrawText(help, 12, GetScreenHeight() - 28, 16, Fade(RAYWHITE, 0.55f));
+    }
+
+    void drawMenu() {
+        DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(BLACK, 0.55f));
+        const auto buttons = menuButtons();
+        const int cx = GetScreenWidth() / 2;
+        auto centered = [cx](const char* text, float y, int size, Color c) {
+            DrawText(text, cx - MeasureText(text, size) / 2, static_cast<int>(y), size, c);
+        };
+        centered("Chess 3D", buttons[0].rect.y - 110, 48, RAYWHITE);
+        centered("AI level", buttons[0].rect.y - 30, 20, Fade(RAYWHITE, 0.7f));
+        centered("New game", buttons[3].rect.y - 30, 20, Fade(RAYWHITE, 0.7f));
+        const Vector2 mouse = cursorPosition();
+        for (const Button& b : buttons) {
+            const bool selected = b.id == level_;
+            const bool hover = CheckCollisionPointRec(mouse, b.rect);
+            DrawRectangleRec(b.rect, selected ? kSelect : hover ? Color{70, 70, 84, 255} : Color{44, 44, 54, 255});
+            const Color text = selected ? BLACK : RAYWHITE;
+            DrawText(b.label, static_cast<int>(b.rect.x + (b.rect.width - MeasureText(b.label, 20)) / 2),
+                     static_cast<int>(b.rect.y + 12), 20, text);
+        }
+        if (gameStarted_) centered("Esc to return to the game", buttons[3].rect.y + 70, 18, Fade(RAYWHITE, 0.55f));
     }
 
     void draw() {
@@ -404,7 +522,8 @@ private:
         drawPromotionPicker();
         EndMode3D();
         drawLabels();
-        drawHud();
+        if (menuOpen_) drawMenu();
+        else drawHud();
         EndDrawing();
     }
 };
