@@ -64,6 +64,16 @@ int main() {
     const Position promo = Position::fromFen("8/4P3/8/8/8/8/k7/4K3 w - - 0 1");
     expect(promo.parseUci("e7e8n").promo == KNIGHT && promo.parseUci("e7e8").from < 0, "promotion needs its piece letter");
 
+    // Battle mode plays pseudo-legal moves: walking into check and capturing a king are allowed.
+    const Position hunt = Position::fromFen("7k/8/8/8/8/8/3r4/4K2R w - - 0 1");
+    auto has = [](const std::vector<Move>& ms, int from, int to) {
+        for (const Move& m : ms)
+            if (m.from == from && m.to == to) return true;
+        return false;
+    };
+    expect(has(hunt.pseudoLegalMoves(), 4, 12) && !has(hunt.legalMoves(), 4, 12), "pseudo-legal moves may walk into check");
+    expect(has(hunt.pseudoLegalMoves(), 7, 63), "pseudo-legal moves may capture the king");
+
     std::printf(failures ? "%d failure(s)\n" : "all passed\n", failures);
     return failures ? 1 : 0;
 }

@@ -8,7 +8,7 @@ A 3D chess prototype in C++17 with [raylib](https://www.raylib.com/) 5.5. Play h
 cmake -B build
 cmake --build build -j
 ./build/chess3d
-ctest --test-dir build   # perft, rules and AI tests
+ctest --test-dir build   # perft, rules, AI and battle tests
 ```
 
 CMake downloads raylib on the first configure, so no system package is needed.
@@ -25,11 +25,43 @@ python3 -m http.server -d build-web   # open http://localhost:8000
 
 `.github/workflows/pages.yml` builds the same thing on every push to `main` and deploys it to GitHub Pages. In the repo settings, set Pages → Source to "GitHub Actions".
 
+## AI strength
+
+| Level | Search | Elo (95% range) |
+|---|---|---|
+| Easy | depth 2, then a random move within 80 cp of the best | ~1190 (1140–1240) |
+| Medium | depth 4, then a random move within 45 cp of the best | ~1430 (1390–1480) |
+| Hard | as deep as fits in 1.5 s, always the best move | ~1900 (1850–1950) |
+
+Measured in November 2026 on a desktop CPU over 200 games per level against Stockfish 19 with `UCI_LimitStrength`. Stockfish played at 20 s + 0.2 s, and the games started from 24 short openings with each colour. The numbers are on Stockfish's computer rating scale (CCRL-anchored) at a faster time control than it is calibrated for, so treat them as rough, not as human or FIDE ratings. In the browser, Hard searches less deeply in its 1.5 s and plays somewhat weaker.
+
 ## Online play (web only)
 
 In the menu, **Create room** gives you a random colour and a 4-letter code; the page address becomes `…/chess3d/#CODE`. Send that link (press C to copy it) or the code; your friend opens the link or picks **Join room** and types the code. The browsers connect directly over WebRTC through [PeerJS](https://peerjs.com/), whose free public server only introduces them. There is no game server.
 
 Each browser keeps the room's moves in `localStorage`, so reopening the link after a reload or a dropped connection puts you back in your seat with the board as it was. There is no clock and no undo online. Players behind strict NATs may fail to connect, because no TURN relay is configured.
+
+## Battle mode (offline)
+
+Turn on **Battle mode** in the menu before starting a hotseat or vs-AI game. Every capture becomes a turn-based duel in an arena: the capturing piece strikes first, and each turn a fighter picks **Attack**, its **Skill** (2-turn cooldown) or **Guard** (half damage until its next turn, plus a small heal). Against the AI, the AI fights its own battles.
+
+| Piece | HP | ATK | DEF | SPD | Skill |
+|---|---|---|---|---|---|
+| Pawn | 40 | 10 | 4 | 5 | Valiant Strike: 2.2x power, 35% to miss |
+| Knight | 60 | 13 | 6 | 9 | Leap Strike: 1.3x power, ignores defense |
+| Bishop | 55 | 12 | 5 | 7 | Mend: heal 40% of max HP |
+| Rook | 80 | 14 | 9 | 3 | Bulwark: block 75% of the next hit and strike back |
+| Queen | 95 | 17 | 8 | 7 | Royal Storm: three hits at 0.6x power |
+
+Hits can crit (12%, 1.6x, ignores defense). A faster target dodges more often. After 12 turns both sides tire and every hit grows stronger, so no battle lasts forever.
+
+- If the attacker wins, the capture happens as normal. If it loses, the attacker is removed, the defender keeps its square and the turn passes.
+- Damage persists: wounded pieces show an HP bar on the board. A pawn that promotes comes back at full HP.
+- King hunt: check rules are off. You may leave your king attacked, and moving onto the enemy king starts a battle like any other capture. Checkmate and stalemate don't end the game; it ends when a king dies in battle (a king that loses while attacking dies too).
+- The toggle applies from the next new game.
+- The AI attacks an enemy king whenever it can, with its healthiest attacker. Otherwise its search plays ordinary chess and doesn't know about battles.
+
+In a battle, choose a command with 1 / 2 / 3, the arrow keys and Enter, or the mouse.
 
 ## Controls
 
@@ -49,14 +81,16 @@ Each browser keeps the room's moves in `localStorage`, so reopening the link aft
 ## Layout
 
 - `src/chess.{hpp,cpp}`: rules engine (no raylib dependency), with move generation verified by perft
-- `src/ai.{hpp,cpp}`: AI opponent: alpha-beta with quiescence, piece-square tables, a time budget per level, and an explicit stack so it searches a few ms per frame instead of freezing the page
+- `src/ai.{hpp,cpp}`: AI opponent: alpha-beta with quiescence, piece-square tables, a time budget per level, an optional margin for picking a random near-best move (the easier levels), and an explicit stack so it searches a few ms per frame instead of freezing the page
 - `src/pieces.{hpp,cpp}`: procedural piece meshes
 - `src/shaders.hpp`: lighting shader (GLSL 330 desktop / GLSL 100 web)
 - `src/net.{hpp,cpp}`, `web/net.js`: online rooms; the C++ side calls the PeerJS code in `net.js` (bundled with `--pre-js`) and stubs everything out on desktop
-- `src/main.cpp`: app loop, camera, picking, rendering, HUD, online room protocol
+- `src/battle.{hpp,cpp}`: battle-mode duel rules (no raylib dependency)
+- `src/main.cpp`: app loop, camera, picking, rendering, HUD, online room protocol, battle arena scene
 - `tests/perft.cpp`: node counts against published perft results
-- `tests/rules.cpp`: which positions count as repeated, UCI move text
-- `tests/ai.cpp`: evaluation symmetry, mates in one, time budget
+- `tests/rules.cpp`: which positions count as repeated, UCI move text, battle-mode pseudo-legal moves (walking into check, capturing a king)
+- `tests/ai.cpp`: evaluation symmetry, mates in one, the near-best-move margin, time budget
+- `tests/battle.cpp`: battles end, HP stays in range, cooldowns, healing caps, rough balance
 
 ## Not yet
 

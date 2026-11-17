@@ -204,6 +204,12 @@ Position Position::apply(const Move& m) const {
     return n;
 }
 
+std::vector<Move> Position::pseudoLegalMoves() const {
+    std::vector<Move> out;
+    pseudoMoves(out);
+    return out;
+}
+
 std::vector<Move> Position::legalMoves() const {
     std::vector<Move> pseudo, legal;
     pseudo.reserve(64);

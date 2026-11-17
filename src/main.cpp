@@ -1,15 +1,20 @@
-// 3D chess prototype: hotseat, vs-AI or online play with full rules, orbit camera, click-to-move.
+// 3D chess prototype: hotseat, vs-AI or online play with full rules, orbit camera, click-to-move,
+// and an offline battle mode where every capture is fought out as a turn-based duel.
 #include <raylib.h>
 #include <raymath.h>
 
 #include <algorithm>
+#include <array>
+#include <climits>
 #include <cctype>
 #include <cmath>
 #include <sstream>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "ai.hpp"
+#include "battle.hpp"
 #include "chess.hpp"
 #include "net.hpp"
 #include "pieces.hpp"
@@ -50,9 +55,9 @@ struct Level {
     const char* name;
     SearchLimits limits;
 };
-constexpr Level kLevels[3] = {{"Easy", {2, 300}}, {"Medium", {4, 600}}, {"Hard", {64, 1500}}};
+constexpr Level kLevels[3] = {{"Easy", {2, 300, 80}}, {"Medium", {4, 600, 45}}, {"Hard", {64, 1500}}};
 
-enum MenuId { kLevelEasy, kLevelMedium, kLevelHard, kHotseat, kPlayWhite, kPlayBlack, kPlayRandom, kCreateRoom, kJoinRoom };
+enum MenuId { kLevelEasy, kLevelMedium, kLevelHard, kHotseat, kPlayWhite, kPlayBlack, kPlayRandom, kCreateRoom, kJoinRoom, kBattleToggle };
 constexpr int kCodeLength = 4;
 struct Button {
     Rectangle rect;
@@ -70,6 +75,33 @@ const Color kSelect{240, 210, 70, 255};
 const Color kLastMove{200, 210, 90, 255};
 const Color kCheck{220, 60, 50, 255};
 const Color kTarget{70, 160, 90, 255};
+const Color kHeal{90, 210, 120, 255};
+const Color kPanel{24, 26, 48, 235};
+const Color kPanelEdge{200, 200, 230, 255};
+
+constexpr float kBattleIntroSeconds = 0.9f;
+constexpr float kBattleEventSeconds = 0.8f;
+constexpr float kBattleAiDelay = 0.5f;
+const char* const kCommandNames[3] = {"Attack", "Skill", "Guard"};
+
+// Square of the piece a move captures (differs from `to` for en passant).
+int capturedSquare(const Move& m) { return m.flags & EN_PASSANT ? rankOf(m.from) * 8 + fileOf(m.to) : m.to; }
+
+// The position after a capture whose attacker lost its battle: the attacker is gone, the
+// defender keeps its square, and the turn passes.
+Position repelled(const Position& p, const Move& m) {
+    Position r = p;
+    r.sq[m.from] = EMPTY;
+    switch (m.from) {  // a rook that dies on its home square takes its castling right with it
+        case 7: r.castling &= ~1; break;
+        case 0: r.castling &= ~2; break;
+        case 63: r.castling &= ~4; break;
+        case 56: r.castling &= ~8; break;
+    }
+    r.side = p.side == White ? Black : White;
+    r.ep = -1;
+    return r;
+}
 
 Vector3 squareCenter(int s) { return {fileOf(s) - 3.5f, 0.0f, 3.5f - rankOf(s)}; }
 
@@ -137,6 +169,33 @@ private:
     int animFrom_ = -1, animTo_ = -1;
     float animT_ = 1;
 
+    // Battle mode (offline only): every capture is a battle, check no longer restricts moves, and a
+    // game is won by killing the enemy king. Pieces carry damage between battles, kept per square.
+    bool battleMode_ = false;  // menu toggle; applies from the next new game
+    bool battleGame_ = false;  // the current game is a battle game
+    bool kingDead_ = false;
+    std::array<int, 64> dmg_{};
+    std::vector<std::array<int, 64>> dmgHistory_;  // parallel to history_
+    struct Popup {
+        int target;
+        std::string text;
+        Color color;
+        float t = 0;
+    };
+    struct BattleScene {
+        battle::Battle fight;
+        Move move;
+        std::vector<battle::Event> queue;
+        size_t next = 0;
+        float eventT = 0;   // seconds into queue[next]
+        bool applied = false;  // queue[next]'s HP change has been shown
+        int shownHp[2];
+        float introT = 0, outroT = 0, aiT = 0;
+        int cursor = 0;  // highlighted command
+        std::vector<Popup> popups;
+    };
+    std::unique_ptr<BattleScene> battle_;
+
     Camera3D camera_{};
     float yaw_ = 0, targetYaw_ = 0, pitch_ = 0.85f, dist_ = 11.5f;
     bool autoRotate_ = true;
@@ -168,6 +227,7 @@ private:
         human_ = mode == kPlayBlack || (mode == kPlayRandom && GetRandomValue(0, 1)) ? Black : White;
         menuOpen_ = false;
         gameStarted_ = true;
+        battleGame_ = battleMode_;
         reset();
         faceSideToMove();
     }
@@ -176,6 +236,9 @@ private:
         pos_ = Position::start();
         history_.clear();
         moves_.clear();
+        dmg_.fill(0);
+        dmgHistory_.clear();
+        battle_.reset();
         clearSelection();
         animT_ = 1;
         refresh();
@@ -187,10 +250,12 @@ private:
     }
 
     void refresh() {
-        legal_ = pos_.legalMoves();
+        legal_ = battleGame_ ? pos_.pseudoLegalMoves() : pos_.legalMoves();
         const bool check = pos_.inCheck(pos_.side);
-        status_ = legal_.empty() ? (check ? Status::Checkmate : Status::Stalemate)
+        // In a battle game an attacked king can still fight, so no position is checkmate.
+        status_ = legal_.empty() ? (check && !battleGame_ ? Status::Checkmate : Status::Stalemate)
                                  : (check ? Status::Check : Status::Playing);
+        kingDead_ = pos_.kingSquare(White) < 0 || pos_.kingSquare(Black) < 0;
         const PositionKey key = pos_.key();
         reps_ = 1;
         for (const Position& p : history_) reps_ += p.key() == key;
@@ -208,12 +273,81 @@ private:
     }
 
     void play(const Move& m) {
+        record(m);
+        advance(m);
+    }
+
+    void record(const Move& m) {
         history_.push_back(pos_);
+        dmgHistory_.push_back(dmg_);
         moves_.push_back(m);
+    }
+
+    void advance(const Move& m) {
+        carryDamage(m);
         pos_ = pos_.apply(m);
         animFrom_ = m.from;
         animTo_ = m.to;
         animT_ = 0;
+        clearSelection();
+        refresh();
+    }
+
+    // Damage travels with the piece; a captured piece's damage is dropped, a promoted pawn is healed.
+    void carryDamage(const Move& m) {
+        dmg_[capturedSquare(m)] = 0;
+        dmg_[m.to] = m.promo != EMPTY ? 0 : dmg_[m.from];
+        if (m.to != m.from) dmg_[m.from] = 0;
+        if (m.flags & CASTLE) {
+            const int rank = rankOf(m.from) * 8;
+            const bool kingSide = fileOf(m.to) == 6;
+            const int rookFrom = rank + (kingSide ? 7 : 0), rookTo = rank + (kingSide ? 5 : 3);
+            dmg_[rookTo] = dmg_[rookFrom];
+            dmg_[rookFrom] = 0;
+        }
+    }
+
+    int hpAt(int s) const { return battle::maxHp(typeOf(pos_.sq[s])) - dmg_[s]; }
+
+    bool startsBattle(const Move& m) const {
+        return battleGame_ && (m.flags & CAPTURE);
+    }
+
+    // Plays a move, or opens a battle first when it is a capture in battle mode.
+    void perform(const Move& m) {
+        if (!startsBattle(m)) {
+            play(m);
+            return;
+        }
+        const int cap = capturedSquare(m);
+        const int8_t a = pos_.sq[m.from];
+        auto scene = std::unique_ptr<BattleScene>(new BattleScene{
+            battle::Battle(typeOf(a), a > 0, hpAt(m.from), typeOf(pos_.sq[cap]), hpAt(cap),
+                           static_cast<uint32_t>(GetRandomValue(0, INT_MAX))),
+            m});
+        scene->shownHp[0] = scene->fight.fighter(0).hp;
+        scene->shownHp[1] = scene->fight.fighter(1).hp;
+        battle_ = std::move(scene);
+        clearSelection();
+        searcher_.cancel();
+    }
+
+    void finishBattle() {
+        const battle::Battle& f = battle_->fight;
+        const Move m = battle_->move;
+        const bool attackerWon = f.winner() == 0;
+        const int left = f.fighter(f.winner()).hp, type = f.fighter(f.winner()).type;
+        battle_.reset();
+        record(m);
+        if (attackerWon) {
+            dmg_[m.from] = battle::maxHp(type) - left;
+            advance(m);
+            return;
+        }
+        dmg_[capturedSquare(m)] = battle::maxHp(type) - left;
+        dmg_[m.from] = 0;
+        pos_ = repelled(pos_, m);
+        animT_ = 1;
         clearSelection();
         refresh();
     }
@@ -224,6 +358,8 @@ private:
         do {
             pos_ = history_.back();
             history_.pop_back();
+            dmg_ = dmgHistory_.back();
+            dmgHistory_.pop_back();
             moves_.pop_back();
         } while (vsAi_ && pos_.side != human_ && !history_.empty());
         clearSelection();
@@ -237,7 +373,7 @@ private:
 
     // A move made by the local player; online it also goes to the opponent.
     void commit(const Move& m) {
-        play(m);
+        perform(m);
         if (!online_) return;
         net::send("move " + std::to_string(moves_.size() - 1) + " " + toUci(m));
         saveRoom();
@@ -268,6 +404,7 @@ private:
 
     void enterRoom(const std::string& code) {
         vsAi_ = false;
+        battleGame_ = false;
         online_ = true;
         room_ = code;
         link_ = Link::Waiting;
@@ -377,8 +514,34 @@ private:
         }
     }
 
+    // The engine only knows legal chess. In a battle game, attack an exposed king first (with the
+    // healthiest attacker), and with no legal move left fall back to any pseudo-legal one, captures first.
+    bool battleOverride(Move& out) const {
+        if (!battleGame_) return false;
+        const int king = pos_.kingSquare(pos_.side == White ? Black : White);
+        const Move* best = nullptr;
+        for (const Move& m : legal_)
+            if (m.to == king && (!best || hpAt(m.from) > hpAt(best->from))) best = &m;
+        if (best) {
+            out = *best;
+            return true;
+        }
+        if (legal_.empty() || !pos_.legalMoves().empty()) return false;
+        std::vector<Move> captures;
+        for (const Move& m : legal_)
+            if (m.flags & CAPTURE) captures.push_back(m);
+        const std::vector<Move>& pool = captures.empty() ? legal_ : captures;
+        out = pool[GetRandomValue(0, static_cast<int>(pool.size()) - 1)];
+        return true;
+    }
+
     void updateAi() {
         if (!aiTurn()) return;
+        Move forced;
+        if (!aiStarted_ && battleOverride(forced)) {
+            if (animT_ >= 1) perform(forced);
+            return;
+        }
         if (!aiStarted_) {
             std::vector<uint64_t> hashes;
             for (const Position& p : history_) hashes.push_back(hashOf(p));
@@ -387,7 +550,7 @@ private:
         }
         if (searcher_.running()) searcher_.step(kAiSliceMs);
         // Let the player's move finish animating before the reply starts.
-        if (!searcher_.running() && animT_ >= 1) play(searcher_.best());
+        if (!searcher_.running() && animT_ >= 1) perform(searcher_.best());
     }
 
     std::vector<Button> menuButtons() const {
@@ -404,9 +567,13 @@ private:
             {row(2, 4, cy + 50), "Play Black", kPlayBlack},
             {row(3, 4, cy + 50), "Random", kPlayRandom},
         };
+        Rectangle toggle = row(0, 1, cy + 106);
+        toggle.x -= w / 2 + gap / 2;
+        toggle.width = 2 * w + gap;
+        b.push_back({toggle, battleMode_ ? "Battle mode: ON" : "Battle mode: off", kBattleToggle});
         if (net::available()) {
-            b.push_back({row(0, 2, cy + 150), "Create room", kCreateRoom});
-            b.push_back({row(1, 2, cy + 150), "Join room", kJoinRoom});
+            b.push_back({row(0, 2, cy + 200), "Create room", kCreateRoom});
+            b.push_back({row(1, 2, cy + 200), "Join room", kJoinRoom});
         }
         return b;
     }
@@ -436,6 +603,7 @@ private:
         for (const Button& b : menuButtons()) {
             if (!CheckCollisionPointRec(cursorPosition(), b.rect)) continue;
             if (b.id <= kLevelHard) level_ = b.id;
+            else if (b.id == kBattleToggle) battleMode_ = !battleMode_;
             else if (b.id == kCreateRoom) createRoom();
             else if (b.id == kJoinRoom) {
                 typingCode_ = true;
@@ -446,7 +614,7 @@ private:
     }
 
     bool gameOver() const {
-        return status_ == Status::Checkmate || status_ == Status::Stalemate || status_ == Status::Repetition;
+        return kingDead_ || status_ == Status::Checkmate || status_ == Status::Stalemate || status_ == Status::Repetition;
     }
     bool canClaimDraw() const { return !gameOver() && !inputLocked() && reps_ >= 3; }
 
@@ -516,6 +684,10 @@ private:
             clearSelection();
             return;
         }
+        if (battle_) {
+            updateBattle(dt);
+            return;
+        }
         if ((IsKeyPressed(KEY_U) || IsKeyPressed(KEY_BACKSPACE)) && !online_) undo();  // no take-backs online
         if (IsKeyPressed(KEY_C) && online_) net::copyLink();
         if (IsKeyPressed(KEY_F)) targetYaw_ += PI;
@@ -558,6 +730,259 @@ private:
             } else {
                 selected_ = -1;
             }
+        }
+    }
+
+    // ---- Battle mode ----
+
+    std::string fighterName(int i) const {
+        const battle::Fighter& f = battle_->fight.fighter(i);
+        return std::string(f.white ? "White " : "Black ") + battle::statsOf(f.type).name;
+    }
+
+    bool aiFighter(int i) const { return vsAi_ && (battle_->fight.fighter(i).white ? White : Black) != human_; }
+
+    static float eventSeconds(const battle::Event& e) {
+        return e.kind == battle::Event::Announce ? kBattleEventSeconds * 0.65f : kBattleEventSeconds;
+    }
+
+    // Bottom-right command menu, one row per battle::Command.
+    Rectangle commandRect(int i) const {
+        const float w = fminf(280, GetScreenWidth() * 0.42f), h = 42;
+        return {GetScreenWidth() - w - 16, GetScreenHeight() - 16 - 3 * (h + 6) + i * (h + 6), w, h};
+    }
+
+    bool awaitingHuman() const {
+        const BattleScene& b = *battle_;
+        return b.introT >= kBattleIntroSeconds && b.next >= b.queue.size() && !b.fight.over() && !aiFighter(b.fight.turn());
+    }
+
+    void enqueue(std::vector<battle::Event> events) {
+        BattleScene& b = *battle_;
+        b.queue = std::move(events);
+        b.next = 0;
+        b.eventT = 0;
+        b.applied = false;
+    }
+
+    void updateBattle(float dt) {
+        BattleScene& b = *battle_;
+        for (Popup& p : b.popups) p.t += dt;
+        b.popups.erase(std::remove_if(b.popups.begin(), b.popups.end(), [](const Popup& p) { return p.t > 1.2f; }),
+                       b.popups.end());
+        if (b.introT < kBattleIntroSeconds) {
+            b.introT += dt;
+            return;
+        }
+        if (b.next < b.queue.size()) {
+            const battle::Event& e = b.queue[b.next];
+            b.eventT += dt;
+            if (!b.applied && b.eventT >= eventSeconds(e) * 0.45f) {
+                b.applied = true;
+                b.shownHp[0] = e.hp[0];
+                b.shownHp[1] = e.hp[1];
+                using K = battle::Event;
+                if (e.kind == K::Hit) b.popups.push_back({e.target, TextFormat(e.crit ? "%d!" : "%d", e.amount), e.crit ? kSelect : RAYWHITE});
+                if (e.kind == K::Miss) b.popups.push_back({e.target, "MISS", Fade(RAYWHITE, 0.7f)});
+                if ((e.kind == K::Heal || e.kind == K::Guard) && e.amount > 0) b.popups.push_back({e.target, TextFormat("+%d", e.amount), kHeal});
+                if (e.kind == K::Guard && e.amount == 0) b.popups.push_back({e.target, "GUARD", SKYBLUE});
+            }
+            if (b.eventT >= eventSeconds(e)) {
+                ++b.next;
+                b.eventT = 0;
+                b.applied = false;
+            }
+            return;
+        }
+        const bool confirm = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE);
+        if (b.fight.over()) {
+            b.outroT += dt;
+            if (b.outroT > 0.8f && confirm) finishBattle();
+            return;
+        }
+        if (aiFighter(b.fight.turn())) {
+            b.aiT += dt;
+            if (b.aiT >= kBattleAiDelay) {
+                b.aiT = 0;
+                enqueue(b.fight.act(b.fight.aiChoice()));
+            }
+            return;
+        }
+        int chosen = -1;
+        if (IsKeyPressed(KEY_UP)) b.cursor = (b.cursor + 2) % 3;
+        if (IsKeyPressed(KEY_DOWN)) b.cursor = (b.cursor + 1) % 3;
+        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)) chosen = b.cursor;
+        for (int i = 0; i < 3; ++i) {
+            if (IsKeyPressed(KEY_ONE + i)) chosen = i;
+            if (CheckCollisionPointRec(cursorPosition(), commandRect(i))) {
+                b.cursor = i;
+                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) chosen = i;
+            }
+        }
+        const auto command = static_cast<battle::Command>(chosen);
+        if (chosen >= 0 && b.fight.canUse(command)) enqueue(b.fight.act(command));
+    }
+
+    static float fighterX(int i) { return i == 0 ? -1.9f : 1.9f; }
+
+    void drawFighter(int i) {
+        const BattleScene& b = *battle_;
+        const battle::Fighter& f = b.fight.fighter(i);
+        const float dir = i == 0 ? 1.0f : -1.0f;
+        Vector3 at{fighterX(i), 0, 0};
+        Color c = f.white ? kWhitePiece : kBlackPiece;
+        float scale = 1.7f;
+        const float intro = fminf(1.0f, b.introT / (kBattleIntroSeconds * 0.7f));
+        at.x -= dir * (1 - intro * intro * (3 - 2 * intro)) * 5;
+        if (b.next < b.queue.size()) {
+            using K = battle::Event;
+            const K& e = b.queue[b.next];
+            const float t = b.eventT / eventSeconds(e);
+            if (e.actor == i && (e.kind == K::Hit || e.kind == K::Miss)) at.x += dir * sinf(PI * fminf(1.0f, t * 1.6f)) * 1.5f;
+            if (e.actor == i && e.kind == K::Announce) at.y += sinf(PI * t) * 0.4f;
+            if (e.target == i && e.kind == K::Hit && t > 0.4f) {
+                at.x += sinf(t * 70) * 0.1f * (1 - t);
+                c = mix(c, kCheck, 0.7f * (1 - t));
+            }
+            if (e.target == i && e.kind == K::Miss && t > 0.3f) at.z += sinf(PI * (t - 0.3f) / 0.7f) * 0.7f;
+            if (e.actor == i && (e.kind == K::Heal || e.kind == K::Guard))
+                c = mix(c, e.kind == K::Heal ? kHeal : SKYBLUE, 0.6f * sinf(PI * t));
+        }
+        if (b.fight.over() && b.next >= b.queue.size() && b.fight.winner() != i) {
+            const float k = fminf(1.0f, b.outroT / 0.8f);
+            at.y -= k * 1.4f * scale;  // sinks through the arena floor
+            c = mix(c, {20, 20, 20, 255}, k);
+        }
+        if (b.introT >= kBattleIntroSeconds && b.next >= b.queue.size() && !b.fight.over() && b.fight.turn() == i) {
+            const float pulse = 0.5f + 0.5f * sinf(static_cast<float>(GetTime()) * 6);
+            drawMesh(pieces_.disc(), box({0.75f, 0.02f, 0.75f}, {at.x, 0.01f, at.z}), mix(kFrame, kSelect, pulse));
+        }
+        if (f.guard > 0 && b.next >= b.queue.size())
+            drawMesh(pieces_.disc(), box({0.85f, 0.015f, 0.85f}, {at.x, 0.005f, at.z}), f.guard == 2 ? kSelect : SKYBLUE);
+        // Board pieces face -z for White; turn them side-on, facing each other.
+        drawPiece(f.type, at, i == 0 ? -PI / 2 : PI / 2, c, scale);
+    }
+
+    void drawPanel(Rectangle r) const {
+        DrawRectangleRounded(r, 0.12f, 6, kPanel);
+        DrawRectangleRoundedLinesEx(r, 0.12f, 6, 2, kPanelEdge);
+    }
+
+    void drawHpBar(float x, float y, float w, float h, int hp, int max) const {
+        const float frac = Clamp(static_cast<float>(hp) / fmaxf(1.0f, static_cast<float>(max)), 0, 1);
+        const Color fill = frac > 0.5f ? kHeal : frac > 0.25f ? kSelect : kCheck;
+        DrawRectangle(static_cast<int>(x), static_cast<int>(y), static_cast<int>(w), static_cast<int>(h), Fade(BLACK, 0.7f));
+        DrawRectangle(static_cast<int>(x), static_cast<int>(y), static_cast<int>(w * frac), static_cast<int>(h), fill);
+    }
+
+    void drawBattle() {
+        const BattleScene& b = *battle_;
+        const int W = GetScreenWidth(), H = GetScreenHeight();
+        ClearBackground(BLACK);  // also clears depth
+        DrawRectangleGradientV(0, 0, W, H, {52, 34, 86, 255}, {12, 10, 22, 255});
+
+        const float aspect = static_cast<float>(W) / fmaxf(1.0f, static_cast<float>(H));
+        const float back = fmaxf(1.0f, 1.5f / aspect);  // keep both fighters in narrow windows
+        Camera3D cam{};
+        cam.position = {0, 2.4f * back, 8.6f * back};
+        cam.target = {0, 0.35f, 0};  // below the fighters, so they sit above the bottom panels
+        cam.up = {0, 1, 0};
+        cam.fovy = 40;
+        cam.projection = CAMERA_PERSPECTIVE;
+        SetShaderValue(shader_, viewPosLoc_, &cam.position, SHADER_UNIFORM_VEC3);
+        BeginMode3D(cam);
+        drawMesh(pieces_.disc(), box({4.4f, 0.3f, 4.4f}, {0, -0.3f, 0}), kFrame);
+        drawMesh(pieces_.disc(), box({4.1f, 0.3f, 4.1f}, {0, -0.29f, 0}), {86, 70, 110, 255});
+        for (int i = 0; i < 2; ++i) drawFighter(i);
+        EndMode3D();
+
+        for (const Popup& p : b.popups) {
+            const Vector2 at = GetWorldToScreen({fighterX(p.target), 1.9f, 0}, cam);
+            const int size = 40, tw = MeasureText(p.text.c_str(), size);
+            const float a = p.t < 0.8f ? 1.0f : 1 - (p.t - 0.8f) / 0.4f;
+            const int x = static_cast<int>(at.x) - tw / 2, y = static_cast<int>(at.y - p.t * 40);
+            DrawText(p.text.c_str(), x + 2, y + 2, size, Fade(BLACK, a));
+            DrawText(p.text.c_str(), x, y, size, Fade(p.color, a));
+        }
+
+        // Message box along the top.
+        std::string msg;
+        if (b.introT < kBattleIntroSeconds) msg = fighterName(0) + " attacks " + fighterName(1) + "!";
+        else if (b.next < b.queue.size()) msg = b.queue[b.next].text;
+        else if (b.fight.over()) msg = fighterName(b.fight.winner()) + (b.fight.winner() == 0 ? " wins and takes the square!" : " holds its ground - the capture fails!");
+        else if (aiFighter(b.fight.turn())) msg = fighterName(b.fight.turn()) + " is deciding...";
+        else msg = fighterName(b.fight.turn()) + " - choose a command";
+        const Rectangle top{16, 16, W - 32.0f, 52};
+        drawPanel(top);
+        DrawText(msg.c_str(), 32, 32, 22, RAYWHITE);
+
+        // Status panel: both fighters' HP.
+        const Rectangle cmd0 = commandRect(0);
+        const Rectangle status{16, cmd0.y, cmd0.x - 28, commandRect(2).y + cmd0.height - cmd0.y};
+        drawPanel(status);
+        for (int i = 0; i < 2; ++i) {
+            const battle::Fighter& f = b.fight.fighter(i);
+            const int max = battle::maxHp(f.type);
+            const float y = status.y + 18 + i * 64;
+            const bool active = !b.fight.over() && b.fight.turn() == i && b.next >= b.queue.size();
+            DrawText(TextFormat("%s%s", active ? "> " : "  ", fighterName(i).c_str()), static_cast<int>(status.x + 14),
+                     static_cast<int>(y), 20, active ? kSelect : RAYWHITE);
+            const char* tag = f.guard == 2 ? "BULWARK" : f.guard == 1 ? "GUARD" : "";
+            DrawText(TextFormat("%s%s", tag, i == 0 ? "  (attacker)" : "  (defender)"),
+                     static_cast<int>(status.x + 14 + MeasureText(fighterName(i).c_str(), 20) + 40), static_cast<int>(y + 3), 16,
+                     Fade(RAYWHITE, 0.6f));
+            const float barW = fmaxf(60, status.width - 140);
+            drawHpBar(status.x + 34, y + 28, barW, 12, b.shownHp[i], max);
+            DrawText(TextFormat("%d/%d", b.shownHp[i], max), static_cast<int>(status.x + 44 + barW), static_cast<int>(y + 24), 18,
+                     RAYWHITE);
+        }
+
+        // Command menu.
+        const bool live = awaitingHuman();
+        const battle::Fighter& actor = b.fight.fighter(b.fight.turn());
+        for (int i = 0; i < 3; ++i) {
+            const Rectangle r = commandRect(i);
+            const bool usable = b.fight.canUse(static_cast<battle::Command>(i));
+            const bool hot = live && i == b.cursor && usable;
+            DrawRectangleRounded(r, 0.2f, 6, hot ? mix(kPanel, kSelect, 0.35f) : kPanel);
+            DrawRectangleRoundedLinesEx(r, 0.2f, 6, 2, hot ? kSelect : Fade(kPanelEdge, live ? 1.0f : 0.35f));
+            std::string label = TextFormat("%d  %s", i + 1, kCommandNames[i]);
+            if (i == 1) label += std::string(": ") + battle::statsOf(actor.type).skill;
+            if (i == 1 && !usable) label += TextFormat(" (%d)", actor.cooldown);
+            const Color text = !live ? Fade(RAYWHITE, 0.35f) : usable ? RAYWHITE : Fade(RAYWHITE, 0.4f);
+            DrawText(label.c_str(), static_cast<int>(r.x + 14), static_cast<int>(r.y + 11), 20, text);
+        }
+        if (live && b.cursor == 1) {
+            const char* info = battle::statsOf(actor.type).skillInfo;
+            const Rectangle r = commandRect(0);
+            DrawText(info, static_cast<int>(r.x + r.width - MeasureText(info, 16)), static_cast<int>(r.y - 24), 16, Fade(RAYWHITE, 0.75f));
+        }
+
+        // Banners.
+        auto banner = [&](const char* big, const char* small, float scale) {
+            const int size = static_cast<int>(64 * scale);
+            const int y = 84;  // just under the message box, above the fighters
+            DrawText(big, (W - MeasureText(big, size)) / 2 + 3, y + 3, size, Fade(BLACK, 0.6f));
+            DrawText(big, (W - MeasureText(big, size)) / 2, y, size, kSelect);
+            if (small) DrawText(small, (W - MeasureText(small, 22)) / 2, y + size + 8, 22, RAYWHITE);
+        };
+        if (b.introT < kBattleIntroSeconds) {
+            const float k = fminf(1.0f, b.introT / 0.25f);
+            banner("BATTLE!", (fighterName(0) + "  vs  " + fighterName(1)).c_str(), 0.5f + 0.5f * k);
+        } else if (b.fight.over() && b.next >= b.queue.size()) {
+            banner(b.fight.winner() == 0 ? "VICTORY" : "REPELLED", b.outroT > 0.8f ? "click or press Enter to continue" : nullptr, 1);
+        }
+    }
+
+    // Small HP bars over wounded pieces on the board.
+    void drawHpBars() {
+        if (!battleGame_) return;
+        for (int s = 0; s < 64; ++s) {
+            if (pos_.sq[s] == EMPTY || dmg_[s] <= 0) continue;
+            Vector3 at = squareCenter(s);
+            at.y = 1.5f;
+            const Vector2 p = GetWorldToScreen(at, camera_);
+            drawHpBar(p.x - 20, p.y, 40, 6, hpAt(s), battle::maxHp(typeOf(pos_.sq[s])));
         }
     }
 
@@ -613,8 +1038,9 @@ private:
         }
     }
 
-    void drawPiece(int type, Vector3 at, float rotY, Color c) {
-        const Matrix world = MatrixMultiply(MatrixRotateY(rotY), MatrixTranslate(at.x, at.y, at.z));
+    void drawPiece(int type, Vector3 at, float rotY, Color c, float scale = 1) {
+        const Matrix world = MatrixMultiply(MatrixMultiply(MatrixScale(scale, scale, scale), MatrixRotateY(rotY)),
+                                            MatrixTranslate(at.x, at.y, at.z));
         for (const PiecePart& part : pieces_.parts(type)) drawMesh(part.mesh, MatrixMultiply(part.local, world), c);
     }
 
@@ -654,7 +1080,11 @@ private:
         const char* winner = pos_.side == White ? "Black" : "White";
         const char* text = nullptr;
         Color color = RAYWHITE;
-        switch (status_) {
+        if (kingDead_) {
+            const char* fallen = pos_.kingSquare(White) < 0 ? "White" : "Black";
+            text = TextFormat("The %s king has fallen - %s wins", fallen, fallen[0] == 'W' ? "Black" : "White");
+            color = kSelect;
+        } else switch (status_) {
             case Status::Playing: text = TextFormat("%s to move", side); break;
             case Status::Check: text = TextFormat("%s to move - CHECK", side); color = kCheck; break;
             case Status::Checkmate: text = TextFormat("Checkmate - %s wins", winner); color = kSelect; break;
@@ -675,6 +1105,7 @@ private:
                                                  : link_ == Link::Disconnected ? "opponent disconnected"
                                                                                : "waiting for opponent")
                                     : TextFormat("Move %d   hotseat", moveNo);
+        if (battleGame_) sub = TextFormat("%s   BATTLE MODE", sub);
         DrawText(sub, 24, 62, 18, Fade(RAYWHITE, 0.6f));
         if (online_ && !netError_.empty())
             DrawText(TextFormat("Network error: %s", netError_.c_str()), 24, 86, 18, kCheck);
@@ -700,14 +1131,15 @@ private:
         centered("New game", buttons[3].rect.y - 30, 20, Fade(RAYWHITE, 0.7f));
         const Vector2 mouse = cursorPosition();
         for (const Button& b : buttons) {
-            const bool selected = b.id == level_;
+            const bool selected = b.id == level_ || (b.id == kBattleToggle && battleMode_);
             const bool hover = CheckCollisionPointRec(mouse, b.rect);
             DrawRectangleRec(b.rect, selected ? kSelect : hover ? Color{70, 70, 84, 255} : Color{44, 44, 54, 255});
             const Color text = selected ? BLACK : RAYWHITE;
             DrawText(b.label, static_cast<int>(b.rect.x + (b.rect.width - MeasureText(b.label, 20)) / 2),
                      static_cast<int>(b.rect.y + 12), 20, text);
         }
-        if (buttons.size() > kJoinRoom) centered("Online", buttons[kCreateRoom].rect.y - 30, 20, Fade(RAYWHITE, 0.7f));
+        for (const Button& b : buttons)
+            if (b.id == kCreateRoom) centered("Online (battle mode is offline only)", b.rect.y - 30, 20, Fade(RAYWHITE, 0.7f));
         const float below = buttons.back().rect.y + buttons.back().rect.height;
         if (!netError_.empty() && !online_) centered(netError_.c_str(), below + 16, 18, kCheck);
         if (gameStarted_) centered("Esc to return to the game", below + 44, 18, Fade(RAYWHITE, 0.55f));
@@ -728,6 +1160,12 @@ private:
 
     void draw() {
         BeginDrawing();
+        if (battle_) {
+            drawBattle();
+            if (menuOpen_) drawMenu();
+            EndDrawing();
+            return;
+        }
         ClearBackground({22, 22, 28, 255});
         SetShaderValue(shader_, viewPosLoc_, &camera_.position, SHADER_UNIFORM_VEC3);
         BeginMode3D(camera_);
@@ -736,6 +1174,7 @@ private:
         drawPromotionPicker();
         EndMode3D();
         drawLabels();
+        drawHpBars();
         if (menuOpen_) drawMenu();
         else drawHud();
         EndDrawing();

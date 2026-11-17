@@ -50,6 +50,8 @@ struct Position {
     static Position fromFen(const std::string& fen);
 
     std::vector<Move> legalMoves() const;
+    // Moves that may leave the mover's own king attacked, and may capture the enemy king (battle mode).
+    std::vector<Move> pseudoLegalMoves() const;
     Position apply(const Move& m) const;
     bool attacked(int square, Side by) const;
     bool inCheck(Side c) const;

@@ -53,6 +53,10 @@ int main() {
         alwaysMates &= is(think("6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1", 3, 150), 0, 56);
         alwaysTakes &= is(think("4k3/8/8/3q4/8/8/8/3QK3 w - - 0 1", 3, 150), 3, 35);
     }
+    // At depth 1 the losing Qxd5 (exd5) is searched first, before the moves that beat it.
+    bool neverBlunders = true;
+    for (int i = 0; i < 100; ++i) neverBlunders &= !is(think("6k1/8/4p3/3p4/8/8/8/3QK3 w - - 0 1", 1, 150), 3, 35);
+    expect(neverBlunders, "with a margin it never picks a move scored before the bar rose");
     expect(alwaysMates, "with a margin it still plays mate in one");
     expect(alwaysTakes, "with a margin it still takes a hanging queen");
     {
