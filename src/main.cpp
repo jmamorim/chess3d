@@ -82,7 +82,6 @@ const Color kPanelEdge{200, 200, 230, 255};
 constexpr float kBattleIntroSeconds = 0.9f;
 constexpr float kBattleEventSeconds = 0.8f;
 constexpr float kBattleAiDelay = 0.5f;
-const char* const kCommandNames[3] = {"Attack", "Skill", "Guard"};
 
 // Square of the piece a move captures (differs from `to` for en passant).
 int capturedSquare(const Move& m) { return m.flags & EN_PASSANT ? rankOf(m.from) * 8 + fileOf(m.to) : m.to; }
@@ -195,6 +194,7 @@ private:
         std::vector<Popup> popups;
     };
     std::unique_ptr<BattleScene> battle_;
+    std::array<float, 7> pieceTops_{};
 
     Camera3D camera_{};
     float yaw_ = 0, targetYaw_ = 0, pitch_ = 0.85f, dist_ = 11.5f;
@@ -743,13 +743,35 @@ private:
     bool aiFighter(int i) const { return vsAi_ && (battle_->fight.fighter(i).white ? White : Black) != human_; }
 
     static float eventSeconds(const battle::Event& e) {
-        return e.kind == battle::Event::Announce ? kBattleEventSeconds * 0.65f : kBattleEventSeconds;
+        return e.kind == battle::Event::Announce || e.kind == battle::Event::Status ? kBattleEventSeconds * 0.65f : kBattleEventSeconds;
     }
 
-    // Bottom-right command menu, one row per battle::Command.
+    // Bottom command menu: a 2x2 grid in battle::Command order.
     Rectangle commandRect(int i) const {
-        const float w = fminf(280, GetScreenWidth() * 0.42f), h = 42;
-        return {GetScreenWidth() - w - 16, GetScreenHeight() - 16 - 3 * (h + 6) + i * (h + 6), w, h};
+        const float total = fminf(GetScreenWidth() - 32.0f, 920), gap = 8, h = 60;
+        const float w = (total - gap) / 2;
+        const float x0 = (GetScreenWidth() - total) / 2, y0 = GetScreenHeight() - 16 - 2 * h - gap;
+        return {x0 + (i % 2) * (w + gap), y0 + (i / 2) * (h + gap), w, h};
+    }
+
+    static std::string commandLabel(int i, int type) {
+        const battle::Stats& st = battle::statsOf(type);
+        switch (i) {
+            case 0: return "Attack";
+            case 1: return st.skill;
+            case 2: return st.skill2;
+            default: return "Guard";
+        }
+    }
+
+    static const char* commandInfo(int i, int type) {
+        const battle::Stats& st = battle::statsOf(type);
+        switch (i) {
+            case 0: return "1.0x power";
+            case 1: return st.skillInfo;
+            case 2: return st.skill2Info;
+            default: return "half damage until your next turn, heal 5%";
+        }
     }
 
     bool awaitingHuman() const {
@@ -785,7 +807,8 @@ private:
                 if (e.kind == K::Hit) b.popups.push_back({e.target, TextFormat(e.crit ? "%d!" : "%d", e.amount), e.crit ? kSelect : RAYWHITE});
                 if (e.kind == K::Miss) b.popups.push_back({e.target, "MISS", Fade(RAYWHITE, 0.7f)});
                 if ((e.kind == K::Heal || e.kind == K::Guard) && e.amount > 0) b.popups.push_back({e.target, TextFormat("+%d", e.amount), kHeal});
-                if (e.kind == K::Guard && e.amount == 0) b.popups.push_back({e.target, "GUARD", SKYBLUE});
+                // A tag follows a heal number a moment later so the two don't overlap.
+                if (e.tag) b.popups.push_back({e.target, e.tag, e.kind == K::Status ? kCheck : SKYBLUE, e.amount > 0 ? -0.35f : 0.0f});
             }
             if (b.eventT >= eventSeconds(e)) {
                 ++b.next;
@@ -809,10 +832,10 @@ private:
             return;
         }
         int chosen = -1;
-        if (IsKeyPressed(KEY_UP)) b.cursor = (b.cursor + 2) % 3;
-        if (IsKeyPressed(KEY_DOWN)) b.cursor = (b.cursor + 1) % 3;
+        if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_RIGHT)) b.cursor ^= 1;
+        if (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_DOWN)) b.cursor ^= 2;
         if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)) chosen = b.cursor;
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 4; ++i) {
             if (IsKeyPressed(KEY_ONE + i)) chosen = i;
             if (CheckCollisionPointRec(cursorPosition(), commandRect(i))) {
                 b.cursor = i;
@@ -825,13 +848,27 @@ private:
 
     static float fighterX(int i) { return i == 0 ? -1.9f : 1.9f; }
 
-    void drawFighter(int i) {
+    static constexpr float kFighterScale = 1.7f;
+
+    // Height of a piece's model at scale 1, for placing labels over it.
+    float pieceTop(int type) {
+        float& top = pieceTops_[type];
+        if (top <= 0)
+            for (const PiecePart& part : pieces_.parts(type)) {
+                const BoundingBox bb = GetMeshBoundingBox(part.mesh);
+                top = fmaxf(top, fmaxf(Vector3Transform(bb.min, part.local).y, Vector3Transform(bb.max, part.local).y));
+            }
+        return top;
+    }
+
+    // Returns where the fighter was drawn, for the overhead HP bar.
+    Vector3 drawFighter(int i) {
         const BattleScene& b = *battle_;
         const battle::Fighter& f = b.fight.fighter(i);
         const float dir = i == 0 ? 1.0f : -1.0f;
         Vector3 at{fighterX(i), 0, 0};
         Color c = f.white ? kWhitePiece : kBlackPiece;
-        float scale = 1.7f;
+        const float scale = kFighterScale;
         const float intro = fminf(1.0f, b.introT / (kBattleIntroSeconds * 0.7f));
         at.x -= dir * (1 - intro * intro * (3 - 2 * intro)) * 5;
         if (b.next < b.queue.size()) {
@@ -861,6 +898,7 @@ private:
             drawMesh(pieces_.disc(), box({0.85f, 0.015f, 0.85f}, {at.x, 0.005f, at.z}), f.guard == 2 ? kSelect : SKYBLUE);
         // Board pieces face -z for White; turn them side-on, facing each other.
         drawPiece(f.type, at, i == 0 ? -PI / 2 : PI / 2, c, scale);
+        return at;
     }
 
     void drawPanel(Rectangle r) const {
@@ -893,11 +931,44 @@ private:
         BeginMode3D(cam);
         drawMesh(pieces_.disc(), box({4.4f, 0.3f, 4.4f}, {0, -0.3f, 0}), kFrame);
         drawMesh(pieces_.disc(), box({4.1f, 0.3f, 4.1f}, {0, -0.29f, 0}), {86, 70, 110, 255});
-        for (int i = 0; i < 2; ++i) drawFighter(i);
+        Vector3 anchor[2];
+        for (int i = 0; i < 2; ++i) anchor[i] = drawFighter(i);
         EndMode3D();
 
+        // Name, status tags and HP bar over each fighter.
+        for (int i = 0; i < 2; ++i) {
+            const battle::Fighter& f = b.fight.fighter(i);
+            if (b.introT < kBattleIntroSeconds * 0.7f) break;  // still sliding in
+            if (b.fight.over() && b.next >= b.queue.size() && b.fight.winner() != i) continue;  // sinking out
+            const Vector2 p = GetWorldToScreen({anchor[i].x, anchor[i].y + pieceTop(f.type) * kFighterScale + 0.2f, anchor[i].z}, cam);
+            const int max = battle::maxHp(f.type);
+            const bool active = !b.fight.over() && b.fight.turn() == i && b.next >= b.queue.size();
+            const std::string name = fighterName(i);
+            const float w = 180, x = p.x - w / 2;
+            DrawText(name.c_str(), static_cast<int>(p.x) - MeasureText(name.c_str(), 20) / 2, static_cast<int>(p.y - 46), 20,
+                     active ? kSelect : RAYWHITE);
+            drawHpBar(x, p.y - 22, w, 12, b.shownHp[i], max);
+            DrawRectangleLines(static_cast<int>(x) - 1, static_cast<int>(p.y) - 23, static_cast<int>(w) + 2, 14, Fade(RAYWHITE, 0.5f));
+            const char* hp = TextFormat("%d/%d", b.shownHp[i], max);
+            DrawText(hp, static_cast<int>(p.x) - MeasureText(hp, 16) / 2, static_cast<int>(p.y - 6), 16, RAYWHITE);
+            std::string tags;
+            if (f.guard == 2) tags += "BULWARK  ";
+            if (f.guard == 1) tags += "GUARD  ";
+            if (f.evading) tags += "EVADE  ";
+            if (f.empowered) tags += "EMPOWERED  ";
+            if (f.weakened) tags += "WEAKENED  ";
+            if (!tags.empty()) {
+                tags.resize(tags.size() - 2);
+                DrawText(tags.c_str(), static_cast<int>(p.x) - MeasureText(tags.c_str(), 14) / 2, static_cast<int>(p.y - 64), 14,
+                         f.weakened ? kCheck : SKYBLUE);
+            }
+        }
+
         for (const Popup& p : b.popups) {
-            const Vector2 at = GetWorldToScreen({fighterX(p.target), 1.9f, 0}, cam);
+            if (p.t < 0) continue;  // delayed
+            // Mid-body, so popups stay below the overhead HP bar.
+            const float mid = pieceTop(b.fight.fighter(p.target).type) * kFighterScale * 0.5f;
+            const Vector2 at = GetWorldToScreen({fighterX(p.target), mid, 0}, cam);
             const int size = 40, tw = MeasureText(p.text.c_str(), size);
             const float a = p.t < 0.8f ? 1.0f : 1 - (p.t - 0.8f) / 0.4f;
             const int x = static_cast<int>(at.x) - tw / 2, y = static_cast<int>(at.y - p.t * 40);
@@ -916,46 +987,20 @@ private:
         drawPanel(top);
         DrawText(msg.c_str(), 32, 32, 22, RAYWHITE);
 
-        // Status panel: both fighters' HP.
-        const Rectangle cmd0 = commandRect(0);
-        const Rectangle status{16, cmd0.y, cmd0.x - 28, commandRect(2).y + cmd0.height - cmd0.y};
-        drawPanel(status);
-        for (int i = 0; i < 2; ++i) {
-            const battle::Fighter& f = b.fight.fighter(i);
-            const int max = battle::maxHp(f.type);
-            const float y = status.y + 18 + i * 64;
-            const bool active = !b.fight.over() && b.fight.turn() == i && b.next >= b.queue.size();
-            DrawText(TextFormat("%s%s", active ? "> " : "  ", fighterName(i).c_str()), static_cast<int>(status.x + 14),
-                     static_cast<int>(y), 20, active ? kSelect : RAYWHITE);
-            const char* tag = f.guard == 2 ? "BULWARK" : f.guard == 1 ? "GUARD" : "";
-            DrawText(TextFormat("%s%s", tag, i == 0 ? "  (attacker)" : "  (defender)"),
-                     static_cast<int>(status.x + 14 + MeasureText(fighterName(i).c_str(), 20) + 40), static_cast<int>(y + 3), 16,
-                     Fade(RAYWHITE, 0.6f));
-            const float barW = fmaxf(60, status.width - 140);
-            drawHpBar(status.x + 34, y + 28, barW, 12, b.shownHp[i], max);
-            DrawText(TextFormat("%d/%d", b.shownHp[i], max), static_cast<int>(status.x + 44 + barW), static_cast<int>(y + 24), 18,
-                     RAYWHITE);
-        }
-
         // Command menu.
         const bool live = awaitingHuman();
         const battle::Fighter& actor = b.fight.fighter(b.fight.turn());
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 4; ++i) {
             const Rectangle r = commandRect(i);
             const bool usable = b.fight.canUse(static_cast<battle::Command>(i));
             const bool hot = live && i == b.cursor && usable;
             DrawRectangleRounded(r, 0.2f, 6, hot ? mix(kPanel, kSelect, 0.35f) : kPanel);
             DrawRectangleRoundedLinesEx(r, 0.2f, 6, 2, hot ? kSelect : Fade(kPanelEdge, live ? 1.0f : 0.35f));
-            std::string label = TextFormat("%d  %s", i + 1, kCommandNames[i]);
-            if (i == 1) label += std::string(": ") + battle::statsOf(actor.type).skill;
-            if (i == 1 && !usable) label += TextFormat(" (%d)", actor.cooldown);
+            std::string label = TextFormat("%d  %s", i + 1, commandLabel(i, actor.type).c_str());
+            if (!usable) label += TextFormat("  (ready in %d)", actor.cooldown[i - 1]);
             const Color text = !live ? Fade(RAYWHITE, 0.35f) : usable ? RAYWHITE : Fade(RAYWHITE, 0.4f);
-            DrawText(label.c_str(), static_cast<int>(r.x + 14), static_cast<int>(r.y + 11), 20, text);
-        }
-        if (live && b.cursor == 1) {
-            const char* info = battle::statsOf(actor.type).skillInfo;
-            const Rectangle r = commandRect(0);
-            DrawText(info, static_cast<int>(r.x + r.width - MeasureText(info, 16)), static_cast<int>(r.y - 24), 16, Fade(RAYWHITE, 0.75f));
+            DrawText(label.c_str(), static_cast<int>(r.x + 14), static_cast<int>(r.y + 9), 20, text);
+            DrawText(commandInfo(i, actor.type), static_cast<int>(r.x + 38), static_cast<int>(r.y + 35), 16, Fade(text, 0.7f));
         }
 
         // Banners.

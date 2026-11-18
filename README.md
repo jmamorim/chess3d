@@ -43,15 +43,16 @@ Each browser keeps the room's moves in `localStorage`, so reopening the link aft
 
 ## Battle mode (offline)
 
-Turn on **Battle mode** in the menu before starting a hotseat or vs-AI game. Every capture becomes a turn-based duel in an arena: the capturing piece strikes first, and each turn a fighter picks **Attack**, its **Skill** (2-turn cooldown) or **Guard** (half damage until its next turn, plus a small heal). Against the AI, the AI fights its own battles.
+Turn on **Battle mode** in the menu before starting a hotseat or vs-AI game. Every capture becomes a turn-based duel in an arena: the capturing piece strikes first, and each turn a fighter picks **Attack**, one of its two **skills** (each with its own 2-turn cooldown) or **Guard** (half damage until its next turn, plus a small heal). Each fighter's name, HP bar and active effects float over it. Against the AI, the AI fights its own battles.
 
-| Piece | HP | ATK | DEF | SPD | Skill |
-|---|---|---|---|---|---|
-| Pawn | 40 | 10 | 4 | 5 | Valiant Strike: 2.2x power, 35% to miss |
-| Knight | 60 | 13 | 6 | 9 | Leap Strike: 1.3x power, ignores defense |
-| Bishop | 55 | 12 | 5 | 7 | Mend: heal 40% of max HP |
-| Rook | 80 | 14 | 9 | 3 | Bulwark: block 75% of the next hit and strike back |
-| Queen | 95 | 17 | 8 | 7 | Royal Storm: three hits at 0.6x power |
+| Piece | HP | ATK | DEF | SPD | Skill 1 | Skill 2 |
+|---|---|---|---|---|---|---|
+| Pawn | 40 | 10 | 4 | 5 | Valiant Strike: 2.2x power, 35% to miss | Rally: heal 15%, next hit +60% |
+| Knight | 60 | 13 | 6 | 9 | Leap Strike: 1.3x power, ignores defense | Feint: 75% dodge against the next hit |
+| Bishop | 55 | 12 | 5 | 7 | Mend: heal 40% of max HP | Drain: 1.0x hit, heal half the damage dealt |
+| Rook | 80 | 14 | 9 | 3 | Bulwark: block 75% of the next hit and strike back | Ram: 1.8x power, 20% to miss |
+| Queen | 95 | 17 | 8 | 7 | Royal Storm: three hits at 0.6x power | Dominate: 1.2x hit, the enemy's next action does half damage |
+| King | 100 | 12 | 10 | 4 | Decree: 1.5x power | Royal Guard: heal 20% and guard |
 
 Hits can crit (12%, 1.6x, ignores defense). A faster target dodges more often. After 12 turns both sides tire and every hit grows stronger, so no battle lasts forever.
 
@@ -61,7 +62,7 @@ Hits can crit (12%, 1.6x, ignores defense). A faster target dodges more often. A
 - The toggle applies from the next new game.
 - The AI attacks an enemy king whenever it can, with its healthiest attacker. Otherwise its search plays ordinary chess and doesn't know about battles.
 
-In a battle, choose a command with 1 / 2 / 3, the arrow keys and Enter, or the mouse.
+In a battle, choose a command with 1-4, the arrow keys and Enter, or the mouse.
 
 ## Controls
 
@@ -90,7 +91,7 @@ In a battle, choose a command with 1 / 2 / 3, the arrow keys and Enter, or the m
 - `tests/perft.cpp`: node counts against published perft results
 - `tests/rules.cpp`: which positions count as repeated, UCI move text, battle-mode pseudo-legal moves (walking into check, capturing a king)
 - `tests/ai.cpp`: evaluation symmetry, mates in one, the near-best-move margin, time budget
-- `tests/battle.cpp`: battles end, HP stays in range, cooldowns, healing caps, rough balance
+- `tests/battle.cpp`: battles end, HP stays in range, separate cooldowns, healing caps, each second skill's effect, rough balance
 
 ## Not yet
 

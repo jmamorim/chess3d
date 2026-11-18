@@ -1,4 +1,5 @@
 // Battle-mode rules: fights end, HP stays in range, skills cool down, and stronger pieces win more.
+#include <algorithm>
 #include <cstdio>
 
 #include "battle.hpp"
@@ -62,6 +63,48 @@ int main() {
     Battle capped(chess::BISHOP, true, maxHp(chess::BISHOP) - 3, chess::PAWN, maxHp(chess::PAWN), 2);
     capped.act(Command::Skill);
     expect(capped.fighter(0).hp == maxHp(chess::BISHOP), "healing never goes above max HP");
+
+    Battle twoSkills(chess::QUEEN, true, maxHp(chess::QUEEN), chess::ROOK, maxHp(chess::ROOK), 3);
+    twoSkills.act(Command::Skill);
+    twoSkills.act(Command::Attack);
+    expect(!twoSkills.canUse(Command::Skill) && twoSkills.canUse(Command::Skill2), "each skill has its own cooldown");
+
+    Battle rally(chess::PAWN, true, 10, chess::ROOK, maxHp(chess::ROOK), 4);
+    rally.act(Command::Skill2);
+    expect(rally.fighter(0).hp == 10 + maxHp(chess::PAWN) * 15 / 100 && rally.fighter(0).empowered,
+           "Rally heals 15% and empowers the next hit");
+
+    Battle royal(chess::KING, true, 30, chess::PAWN, maxHp(chess::PAWN), 5);
+    royal.act(Command::Skill2);
+    expect(royal.fighter(0).hp == 30 + maxHp(chess::KING) / 5 && royal.fighter(0).guard == 1, "Royal Guard heals 20% and guards");
+
+    int feintDodges = 0, drainOk = 0, drainHits = 0, weakenedOk = 0, weakenedHits = 0;
+    for (uint32_t seed = 0; seed < 200; ++seed) {
+        Battle feint(chess::KNIGHT, true, maxHp(chess::KNIGHT), chess::QUEEN, maxHp(chess::QUEEN), seed);
+        feint.act(Command::Skill2);
+        const auto reply = feint.act(Command::Attack);
+        feintDodges += reply.size() > 1 && reply[1].kind == Event::Miss;
+
+        Battle drain(chess::BISHOP, true, 10, chess::ROOK, maxHp(chess::ROOK), seed);
+        drain.act(Command::Skill2);
+        const int dealt = maxHp(chess::ROOK) - drain.fighter(1).hp;
+        if (dealt > 0) {
+            ++drainHits;
+            drainOk += drain.fighter(0).hp == 10 + std::max(1, dealt / 2);
+        }
+
+        Battle dominate(chess::QUEEN, true, maxHp(chess::QUEEN), chess::ROOK, maxHp(chess::ROOK), seed);
+        dominate.act(Command::Skill2);
+        if (dominate.fighter(1).hp < maxHp(chess::ROOK)) {
+            ++weakenedHits;
+            const bool marked = dominate.fighter(1).weakened;
+            dominate.act(Command::Attack);
+            weakenedOk += marked && !dominate.fighter(1).weakened;
+        }
+    }
+    expect(feintDodges > 130, "Feint makes the next enemy hit miss most of the time");
+    expect(drainHits > 150 && drainOk == drainHits, "Drain heals half the damage it deals");
+    expect(weakenedHits > 150 && weakenedOk == weakenedHits, "Dominate weakens the target for its next action only");
 
     return failures == 0 ? 0 : 1;
 }
