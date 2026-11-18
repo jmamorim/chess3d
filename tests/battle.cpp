@@ -106,5 +106,50 @@ int main() {
     expect(drainHits > 150 && drainOk == drainHits, "Drain heals half the damage it deals");
     expect(weakenedHits > 150 && weakenedOk == weakenedHits, "Dominate weakens the target for its next action only");
 
+    // Board buffs carried into a battle.
+    Battle shielded(chess::PAWN, true, maxHp(chess::PAWN), chess::ROOK, maxHp(chess::ROOK), 6);
+    shielded.prepare(0, 1, true);
+    shielded.act(Command::Attack);
+    expect(shielded.fighter(0).guard == 1, "a prepared guard on the attacker survives its first action");
+    expect(!shielded.fighter(0).empowered, "a prepared empowered hit is used by the first attack");
+    shielded.act(Command::Attack);
+    shielded.act(Command::Attack);
+    expect(shielded.fighter(0).guard == 0, "the prepared guard ends at the attacker's next turn");
+    Battle fortified(chess::PAWN, true, maxHp(chess::PAWN), chess::ROOK, maxHp(chess::ROOK), 7);
+    fortified.prepare(1, 2, false);
+    const auto opening = fortified.act(Command::Attack);
+    bool counter = false;
+    for (const Event& e : opening) counter = counter || (e.kind == Event::Hit && e.actor == 1);
+    expect(counter || opening.back().kind == Event::Miss, "a fortified defender strikes back at the first hit");
+
+    // Board abilities.
+    std::array<int8_t, 64> board{};
+    Units units{};
+    board[27] = chess::BISHOP;   // d4
+    board[28] = chess::KNIGHT;   // e4, adjacent ally
+    board[36] = -chess::ROOK;    // e5, adjacent enemy
+    board[0] = chess::KING;      // a1, not adjacent
+    units[28].dmg = 50;
+    units[36].dmg = 40;
+    units[0].dmg = 10;
+    expect(abilityUseful(board, units, 27, 0), "Heal is useful next to a wounded ally");
+    const auto healed = useAbility(board, units, 27, 0);
+    expect(units[28].dmg == 50 - maxHp(chess::KNIGHT) / 4 && units[36].dmg == 40 && units[0].dmg == 10 && healed.size() == 1,
+           "Heal restores 25% to adjacent allies only");
+    expect(abilityWait(units[27], 2) == 3 && abilityWait(units[27], 6) == 1 && abilityWait(units[27], 8) == 0,
+           "an ability is unavailable for three of the side's turns");
+    expect(!abilityUseful(board, units, 27, 2), "an ability can't be used while cooling down");
+    units[0].dmg = 5;
+    useAbility(board, units, 0, 0);
+    expect(units[0].dmg == 0, "Rest never heals above max HP");
+    expect(!abilityUseful(board, units, 0, 100), "Rest has no effect on an unhurt king");
+    board[35] = chess::QUEEN;  // d5, next to the bishop and the knight
+    useAbility(board, units, 35, 0);
+    expect((units[27].buffs & kEmpower) && (units[28].buffs & kEmpower) && !(units[36].buffs & kEmpower),
+           "Inspire empowers adjacent allies only");
+    board[8] = chess::PAWN;
+    useAbility(board, units, 8, 0);
+    expect(units[8].buffs == kShield && !abilityUseful(board, units, 8, 100), "Shield Up only stacks once");
+
     return failures == 0 ? 0 : 1;
 }

@@ -173,8 +173,17 @@ private:
     bool battleMode_ = false;  // menu toggle; applies from the next new game
     bool battleGame_ = false;  // the current game is a battle game
     bool kingDead_ = false;
-    std::array<int, 64> dmg_{};
-    std::vector<std::array<int, 64>> dmgHistory_;  // parallel to history_
+    battle::Units units_{};                   // damage, ability cooldown and buffs, per square
+    std::vector<battle::Units> unitHistory_;  // parallel to history_
+    int lastMode_ = kHotseat;                 // for Rematch
+    float endT_ = 0;                          // seconds the end screen has been up
+    struct BoardPopup {
+        int square;
+        std::string text;
+        Color color;
+        float t = 0;
+    };
+    std::vector<BoardPopup> boardPopups_;
     struct Popup {
         int target;
         std::string text;
@@ -223,6 +232,7 @@ private:
 
     void newGame(int mode) {
         leaveRoom();
+        lastMode_ = mode;
         vsAi_ = mode != kHotseat;
         human_ = mode == kPlayBlack || (mode == kPlayRandom && GetRandomValue(0, 1)) ? Black : White;
         menuOpen_ = false;
@@ -236,8 +246,10 @@ private:
         pos_ = Position::start();
         history_.clear();
         moves_.clear();
-        dmg_.fill(0);
-        dmgHistory_.clear();
+        units_.fill({});
+        unitHistory_.clear();
+        boardPopups_.clear();
+        endT_ = 0;
         battle_.reset();
         clearSelection();
         animT_ = 1;
@@ -258,7 +270,8 @@ private:
         kingDead_ = pos_.kingSquare(White) < 0 || pos_.kingSquare(Black) < 0;
         const PositionKey key = pos_.key();
         reps_ = 1;
-        for (const Position& p : history_) reps_ += p.key() == key;
+        // Using an ability changes the pieces' state, so (like a capture would) it resets the count.
+        for (size_t i = history_.size(); i-- > 0 && !isAbility(moves_[i]);) reps_ += history_[i].key() == key;
         // FIDE 9.6.1: the fifth occurrence ends the game without a claim.
         if (!gameOver() && reps_ >= 5) status_ = Status::Repetition;
         searcher_.cancel();
@@ -279,7 +292,7 @@ private:
 
     void record(const Move& m) {
         history_.push_back(pos_);
-        dmgHistory_.push_back(dmg_);
+        unitHistory_.push_back(units_);
         moves_.push_back(m);
     }
 
@@ -293,21 +306,52 @@ private:
         refresh();
     }
 
-    // Damage travels with the piece; a captured piece's damage is dropped, a promoted pawn is healed.
+    // Battle state travels with the piece; a captured piece's is dropped, a promoted pawn starts fresh.
     void carryDamage(const Move& m) {
-        dmg_[capturedSquare(m)] = 0;
-        dmg_[m.to] = m.promo != EMPTY ? 0 : dmg_[m.from];
-        if (m.to != m.from) dmg_[m.from] = 0;
+        units_[capturedSquare(m)] = {};
+        units_[m.to] = m.promo != EMPTY ? battle::Unit{} : units_[m.from];
+        if (m.to != m.from) units_[m.from] = {};
         if (m.flags & CASTLE) {
             const int rank = rankOf(m.from) * 8;
             const bool kingSide = fileOf(m.to) == 6;
             const int rookFrom = rank + (kingSide ? 7 : 0), rookTo = rank + (kingSide ? 5 : 3);
-            dmg_[rookTo] = dmg_[rookFrom];
-            dmg_[rookFrom] = 0;
+            units_[rookTo] = units_[rookFrom];
+            units_[rookFrom] = {};
         }
     }
 
-    int hpAt(int s) const { return battle::maxHp(typeOf(pos_.sq[s])) - dmg_[s]; }
+    int hpAt(int s) const { return battle::maxHp(typeOf(pos_.sq[s])) - units_[s].dmg; }
+    int ply() const { return static_cast<int>(history_.size()); }
+
+    // An ability turn is kept in moves_ as from == to with this flag, so undo and the
+    // last-move highlight work as for a move.
+    static constexpr uint8_t kAbilityFlag = 0x80;
+    static bool isAbility(const Move& m) { return m.flags & kAbilityFlag; }
+
+    bool canUseAbility(int s) const {
+        return battleGame_ && ownPiece(s) && !gameOver() && battle::abilityUseful(pos_.sq, units_, s, ply());
+    }
+
+    // The piece on s uses its ability instead of moving; the turn passes.
+    void useAbility(int s) {
+        Move marker;
+        marker.from = marker.to = static_cast<int8_t>(s);
+        marker.flags = kAbilityFlag;
+        record(marker);
+        for (const battle::AbilityEffect& e : battle::useAbility(pos_.sq, units_, s, ply() - 1)) {
+            if (e.healed > 0) boardPopups_.push_back({e.square, TextFormat("+%d", e.healed), kHeal});
+            if (e.buff) boardPopups_.push_back({e.square, buffName(e.buff), SKYBLUE});
+        }
+        pos_.side = pos_.side == White ? Black : White;
+        pos_.ep = -1;
+        animT_ = 1;
+        clearSelection();
+        refresh();
+    }
+
+    static const char* buffName(uint8_t b) {
+        return b & battle::kBulwark ? "BULWARK" : b & battle::kShield ? "SHIELD" : "EMPOWERED";
+    }
 
     bool startsBattle(const Move& m) const {
         return battleGame_ && (m.flags & CAPTURE);
@@ -325,6 +369,11 @@ private:
             battle::Battle(typeOf(a), a > 0, hpAt(m.from), typeOf(pos_.sq[cap]), hpAt(cap),
                            static_cast<uint32_t>(GetRandomValue(0, INT_MAX))),
             m});
+        // Buffs from abilities used on the board.
+        for (int i = 0; i < 2; ++i) {
+            const uint8_t b = units_[i == 0 ? m.from : cap].buffs;
+            scene->fight.prepare(i, b & battle::kBulwark ? 2 : b & battle::kShield ? 1 : 0, b & battle::kEmpower);
+        }
         scene->shownHp[0] = scene->fight.fighter(0).hp;
         scene->shownHp[1] = scene->fight.fighter(1).hp;
         battle_ = std::move(scene);
@@ -339,13 +388,15 @@ private:
         const int left = f.fighter(f.winner()).hp, type = f.fighter(f.winner()).type;
         battle_.reset();
         record(m);
+        units_[m.from].buffs = 0;  // a battle uses up both pieces' buffs
+        units_[capturedSquare(m)].buffs = 0;
         if (attackerWon) {
-            dmg_[m.from] = battle::maxHp(type) - left;
+            units_[m.from].dmg = battle::maxHp(type) - left;
             advance(m);
             return;
         }
-        dmg_[capturedSquare(m)] = battle::maxHp(type) - left;
-        dmg_[m.from] = 0;
+        units_[capturedSquare(m)].dmg = battle::maxHp(type) - left;
+        units_[m.from] = {};
         pos_ = repelled(pos_, m);
         animT_ = 1;
         clearSelection();
@@ -358,8 +409,8 @@ private:
         do {
             pos_ = history_.back();
             history_.pop_back();
-            dmg_ = dmgHistory_.back();
-            dmgHistory_.pop_back();
+            units_ = unitHistory_.back();
+            unitHistory_.pop_back();
             moves_.pop_back();
         } while (vsAi_ && pos_.side != human_ && !history_.empty());
         clearSelection();
@@ -535,11 +586,38 @@ private:
         return true;
     }
 
+    // The search doesn't know about abilities. Use one only when it clearly helps: a bishop healing
+    // a badly wounded neighbour, or a badly wounded king resting.
+    bool aiAbility(int& out) const {
+        if (!battleGame_) return false;
+        auto badlyHurt = [&](int s) { return hpAt(s) * 2 < battle::maxHp(typeOf(pos_.sq[s])); };
+        for (int s = 0; s < 64; ++s) {
+            if (!canUseAbility(s)) continue;
+            const int type = typeOf(pos_.sq[s]);
+            bool helps = type == KING && badlyHurt(s);
+            for (int dr = -1; dr <= 1 && type == BISHOP; ++dr)
+                for (int df = -1; df <= 1; ++df) {
+                    const int r = rankOf(s) + dr, f = fileOf(s) + df, t = r * 8 + f;
+                    if ((dr || df) && r >= 0 && r < 8 && f >= 0 && f < 8 && ownPiece(t) && badlyHurt(t)) helps = true;
+                }
+            if (helps) {
+                out = s;
+                return true;
+            }
+        }
+        return false;
+    }
+
     void updateAi() {
         if (!aiTurn()) return;
         Move forced;
         if (!aiStarted_ && battleOverride(forced)) {
             if (animT_ >= 1) perform(forced);
+            return;
+        }
+        int ability = -1;
+        if (!aiStarted_ && aiAbility(ability)) {
+            if (animT_ >= 1) useAbility(ability);
             return;
         }
         if (!aiStarted_) {
@@ -650,6 +728,67 @@ private:
         return best;
     }
 
+    // ---- Action panel (battle games): the selected piece moves or uses its ability ----
+
+    bool panelOpen() const { return battleGame_ && selected_ >= 0 && promoTo_ < 0 && !gameOver() && !inputLocked(); }
+
+    // Top-right corner, where it hides the fewest squares (next to the piece it covered move targets).
+    Rectangle panelRect() const {
+        const float w = 300, h = 132;
+        return {fmaxf(12, GetScreenWidth() - w - 12), 12, w, h};
+    }
+
+    Rectangle abilityButton() const {
+        const Rectangle r = panelRect();
+        return {r.x + 10, r.y + r.height - 62, r.width - 20, 52};
+    }
+
+    // ---- End screen ----
+
+    static constexpr float kEndFadeSeconds = 0.6f;
+    enum EndId { kRematch, kToMenu };
+
+    // The side that won, or -1 while the game goes on or after a draw.
+    int winnerSide() const {
+        if (kingDead_) return pos_.kingSquare(White) < 0 ? Black : White;
+        if (status_ == Status::Checkmate) return pos_.side == White ? Black : White;
+        return -1;
+    }
+
+    bool endScreen() const { return winnerSide() >= 0 && !battle_ && animT_ >= 1 && !menuOpen_; }
+
+    std::vector<Button> endButtons() const {
+        const float cx = GetScreenWidth() / 2.0f, y = GetScreenHeight() / 2.0f + 150, w = 160, h = 48, gap = 16;
+        // Online games can't restart in place (newGame leaves the room), so they only offer the menu.
+        if (online_) return {{{cx - w / 2, y, w, h}, "Menu", kToMenu}};
+        return {{{cx - w - gap / 2, y, w, h}, "Rematch", kRematch}, {{cx + gap / 2, y, w, h}, "Menu", kToMenu}};
+    }
+
+    struct SideStats {
+        int battlesWon = 0, piecesLost = 0, abilities = 0;
+    };
+
+    // Counted from the game record, so it stays right after undo.
+    std::array<SideStats, 2> gameStats() const {
+        std::array<SideStats, 2> st{};
+        for (size_t i = 0; i < moves_.size(); ++i) {
+            const Move& m = moves_[i];
+            const Side mover = history_[i].side;
+            const Position& after = i + 1 < history_.size() ? history_[i + 1] : pos_;
+            if (isAbility(m)) {
+                ++st[mover].abilities;
+            } else if (battleGame_ && (m.flags & CAPTURE)) {
+                const bool attackerWon = after.sq[m.to] != EMPTY && sideOf(after.sq[m.to]) == mover;
+                ++st[attackerWon ? mover : (mover == White ? Black : White)].battlesWon;
+            }
+        }
+        int left[2] = {0, 0};
+        for (int8_t p : pos_.sq)
+            if (p != EMPTY) ++left[sideOf(p)];
+        for (int c = 0; c < 2; ++c) st[c].piecesLost = 16 - left[c];
+        return st;
+    }
+
     void update(float dt) {
 #ifdef __EMSCRIPTEN__
         double cssW = 0, cssH = 0;
@@ -702,8 +841,35 @@ private:
         }
 
         if (animT_ < 1) animT_ = fminf(1.0f, animT_ + dt / kAnimSeconds);
+        for (BoardPopup& p : boardPopups_) p.t += dt;
+        boardPopups_.erase(std::remove_if(boardPopups_.begin(), boardPopups_.end(), [](const BoardPopup& p) { return p.t > 1.4f; }),
+                           boardPopups_.end());
+        const bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+        endT_ = endScreen() ? endT_ + dt : 0;
+        if (endScreen()) {
+            if (click && endT_ > kEndFadeSeconds)
+                for (const Button& b : endButtons()) {
+                    if (!CheckCollisionPointRec(cursorPosition(), b.rect)) continue;
+                    if (b.id == kRematch) {
+                        battleMode_ = battleGame_;
+                        newGame(lastMode_);
+                    } else {
+                        menuOpen_ = true;
+                    }
+                }
+            return;
+        }
         updateAi();
         if (inputLocked()) return;
+
+        if (panelOpen()) {
+            const Vector2 mouse = cursorPosition();
+            if (canUseAbility(selected_) && (IsKeyPressed(KEY_E) || (click && CheckCollisionPointRec(mouse, abilityButton())))) {
+                useAbility(selected_);
+                return;
+            }
+            if (CheckCollisionPointRec(mouse, abilityButton())) return;  // a disabled button still eats the click
+        }
 
         const Ray ray = GetScreenToWorldRay(cursorPosition(), camera_);
         if (promoTo_ >= 0) {
@@ -713,7 +879,6 @@ private:
             hovered_ = squareAt(Vector3Add(ray.position, Vector3Scale(ray.direction, t)));
         }
 
-        const bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
         if (promoTo_ >= 0) {
             // Esc or a click off the picker cancels; the pawn stays selected.
             if (IsKeyPressed(KEY_ESCAPE) || (click && promoHover_ < 0)) promoTo_ = -1;
@@ -886,9 +1051,10 @@ private:
                 c = mix(c, e.kind == K::Heal ? kHeal : SKYBLUE, 0.6f * sinf(PI * t));
         }
         if (b.fight.over() && b.next >= b.queue.size() && b.fight.winner() != i) {
+            // Fade out, then stop drawing.
             const float k = fminf(1.0f, b.outroT / 0.8f);
-            at.y -= k * 1.4f * scale;  // sinks through the arena floor
-            c = mix(c, {20, 20, 20, 255}, k);
+            if (k >= 1) return at;
+            c.a = static_cast<unsigned char>(255 * (1 - k));
         }
         if (b.introT >= kBattleIntroSeconds && b.next >= b.queue.size() && !b.fight.over() && b.fight.turn() == i) {
             const float pulse = 0.5f + 0.5f * sinf(static_cast<float>(GetTime()) * 6);
@@ -1015,19 +1181,130 @@ private:
             const float k = fminf(1.0f, b.introT / 0.25f);
             banner("BATTLE!", (fighterName(0) + "  vs  " + fighterName(1)).c_str(), 0.5f + 0.5f * k);
         } else if (b.fight.over() && b.next >= b.queue.size()) {
-            banner(b.fight.winner() == 0 ? "VICTORY" : "REPELLED", b.outroT > 0.8f ? "click or press Enter to continue" : nullptr, 1);
+            // From the player's side against the AI; in hotseat, name the winning colour.
+            const Side won = b.fight.fighter(b.fight.winner()).white ? White : Black;
+            const char* big = vsAi_ ? (won == human_ ? "VICTORY" : "DEFEAT") : won == White ? "WHITE WINS" : "BLACK WINS";
+            banner(big, b.outroT > 0.8f ? "click or press Enter to continue" : nullptr, 1);
         }
     }
 
-    // Small HP bars over wounded pieces on the board.
+    static std::string buffTags(uint8_t b) {
+        std::string out;
+        for (uint8_t f : {battle::kShield, battle::kBulwark, battle::kEmpower})
+            if (b & f) out += std::string(out.empty() ? "" : " ") + buffName(f);
+        return out;
+    }
+
+    void drawActionPanel() {
+        if (!panelOpen()) return;
+        const Rectangle r = panelRect();
+        const int x = static_cast<int>(r.x), y = static_cast<int>(r.y);
+        const int8_t p = pos_.sq[selected_];
+        const int type = typeOf(p), max = battle::maxHp(type);
+        DrawRectangleRounded(r, 0.12f, 6, kPanel);
+        DrawRectangleRoundedLinesEx(r, 0.12f, 6, 2, kPanelEdge);
+        DrawText(TextFormat("%s %s", p > 0 ? "White" : "Black", battle::statsOf(type).name), x + 12, y + 10, 22, kSelect);
+        drawHpBar(r.x + 12, r.y + 40, r.width - 24, 8, hpAt(selected_), max);
+        DrawText(TextFormat("HP %d/%d", hpAt(selected_), max), x + 12, y + 54, 16, RAYWHITE);
+        const std::string tags = buffTags(units_[selected_].buffs);
+        const char* right = tags.empty() ? "move: click a square" : tags.c_str();
+        DrawText(right, x + static_cast<int>(r.width) - 12 - MeasureText(right, 14), y + 56, 14, tags.empty() ? Fade(RAYWHITE, 0.5f) : SKYBLUE);
+
+        const Rectangle btn = abilityButton();
+        const bool ready = canUseAbility(selected_);
+        const bool hot = ready && CheckCollisionPointRec(cursorPosition(), btn);
+        DrawRectangleRounded(btn, 0.2f, 6, hot ? mix(kPanel, kSelect, 0.35f) : mix(kPanel, BLACK, 0.3f));
+        DrawRectangleRoundedLinesEx(btn, 0.2f, 6, 2, ready ? kSelect : Fade(kPanelEdge, 0.35f));
+        const battle::Ability& a = battle::abilityOf(type);
+        const int wait = battle::abilityWait(units_[selected_], ply());
+        std::string label = std::string("E  ") + a.name;
+        if (wait > 0) label += TextFormat("  (ready in %d)", wait);
+        else if (!ready) label += "  (no effect now)";
+        const Color text = ready ? RAYWHITE : Fade(RAYWHITE, 0.4f);
+        DrawText(label.c_str(), static_cast<int>(btn.x + 12), static_cast<int>(btn.y + 7), 20, text);
+        DrawText(a.info, static_cast<int>(btn.x + 34), static_cast<int>(btn.y + 31), 16, Fade(text, 0.7f));
+    }
+
+    void drawEndScreen() {
+        if (!endScreen()) return;
+        const int W = GetScreenWidth(), H = GetScreenHeight(), cx = W / 2;
+        const float k = fminf(1.0f, endT_ / kEndFadeSeconds);
+        DrawRectangle(0, 0, W, H, Fade(BLACK, 0.7f * k));
+        auto centered = [&](const char* text, int y, int size, Color c) {
+            DrawText(text, cx - MeasureText(text, size) / 2, y, size, Fade(c, k));
+        };
+        const Side won = static_cast<Side>(winnerSide());
+        const bool personal = vsAi_ || (online_ && seated_);
+        const bool victory = personal && won == human_;
+        const char* title = personal ? (victory ? "VICTORY" : "DEFEAT") : won == White ? "WHITE WINS" : "BLACK WINS";
+        const int top = H / 2 - 210;
+        int size = 96;  // shrink the title to fit narrow windows
+        while (size > 40 && MeasureText(title, size) > W - 32) size -= 8;
+        DrawText(title, cx - MeasureText(title, size) / 2 + 4, top + 4, size, Fade(BLACK, 0.6f * k));
+        centered(title, top, size, personal && !victory ? kCheck : kSelect);
+        const char* reason = kingDead_ ? TextFormat("The %s king has fallen in battle", won == White ? "black" : "white")
+                                       : TextFormat("Checkmate - %s wins", won == White ? "White" : "Black");
+        centered(reason, top + size + 10, 24, RAYWHITE);
+
+        // Stats: one column per side.
+        const auto st = gameStats();
+        const int tableW = std::min(460, W - 32), labelX = cx - tableW / 2;
+        const int col1 = labelX + tableW * 45 / 100, col2 = labelX + tableW * 73 / 100;
+        const int rowY = top + size + 64;
+        auto row = [&](int i, const char* name, int white, int black) {
+            const int y = rowY + 30 + i * 28;
+            DrawText(name, labelX, y, 18, Fade(RAYWHITE, 0.7f * k));
+            DrawText(TextFormat("%d", white), col1, y, 18, Fade(RAYWHITE, k));
+            DrawText(TextFormat("%d", black), col2, y, 18, Fade(RAYWHITE, k));
+        };
+        auto header = [&](Side c, int x) {
+            const char* name = c == White ? (personal && human_ == White ? "White (you)" : "White")
+                                          : (personal && human_ == Black ? "Black (you)" : "Black");
+            DrawText(name, x, rowY, 18, Fade(kSelect, k));
+        };
+        header(White, col1);
+        header(Black, col2);
+        int i = 0;
+        if (battleGame_) {
+            row(i++, "Battles won", st[White].battlesWon, st[Black].battlesWon);
+            row(i++, "Abilities used", st[White].abilities, st[Black].abilities);
+        }
+        row(i++, "Pieces lost", st[White].piecesLost, st[Black].piecesLost);
+        centered(TextFormat("%d turns played", static_cast<int>(moves_.size())), rowY + 30 + i * 28 + 8, 18, Fade(RAYWHITE, 0.6f));
+
+        const Vector2 mouse = cursorPosition();
+        for (const Button& b : endButtons()) {
+            const bool hover = endT_ > kEndFadeSeconds && CheckCollisionPointRec(mouse, b.rect);
+            DrawRectangleRounded(b.rect, 0.2f, 6, Fade(hover ? mix(kPanel, kSelect, 0.35f) : kPanel, k));
+            DrawRectangleRoundedLinesEx(b.rect, 0.2f, 6, 2, Fade(hover ? kSelect : kPanelEdge, k));
+            DrawText(b.label, static_cast<int>(b.rect.x + (b.rect.width - MeasureText(b.label, 22)) / 2),
+                     static_cast<int>(b.rect.y + 13), 22, Fade(RAYWHITE, k));
+        }
+        if (!online_) centered("U undo the last move", static_cast<int>(endButtons()[0].rect.y) + 64, 16, Fade(RAYWHITE, 0.45f));
+    }
+
+    // Small HP bars over wounded pieces on the board, buff tags, and ability popups.
     void drawHpBars() {
         if (!battleGame_) return;
         for (int s = 0; s < 64; ++s) {
-            if (pos_.sq[s] == EMPTY || dmg_[s] <= 0) continue;
+            const battle::Unit& u = units_[s];
+            if (pos_.sq[s] == EMPTY || (u.dmg <= 0 && !u.buffs)) continue;
             Vector3 at = squareCenter(s);
             at.y = 1.5f;
             const Vector2 p = GetWorldToScreen(at, camera_);
-            drawHpBar(p.x - 20, p.y, 40, 6, hpAt(s), battle::maxHp(typeOf(pos_.sq[s])));
+            if (u.dmg > 0) drawHpBar(p.x - 20, p.y, 40, 6, hpAt(s), battle::maxHp(typeOf(pos_.sq[s])));
+            const std::string tags = buffTags(u.buffs);
+            if (!tags.empty())
+                DrawText(tags.c_str(), static_cast<int>(p.x) - MeasureText(tags.c_str(), 12) / 2, static_cast<int>(p.y) - 15, 12, SKYBLUE);
+        }
+        for (const BoardPopup& pop : boardPopups_) {
+            Vector3 at = squareCenter(pop.square);
+            at.y = 1.2f + pop.t * 0.5f;
+            const Vector2 p = GetWorldToScreen(at, camera_);
+            const float alpha = fminf(1.0f, (1.4f - pop.t) / 0.4f);
+            const int w = MeasureText(pop.text.c_str(), 22);
+            DrawText(pop.text.c_str(), static_cast<int>(p.x) - w / 2 + 2, static_cast<int>(p.y) + 2, 22, Fade(BLACK, 0.6f * alpha));
+            DrawText(pop.text.c_str(), static_cast<int>(p.x) - w / 2, static_cast<int>(p.y), 22, Fade(pop.color, alpha));
         }
     }
 
@@ -1159,8 +1436,8 @@ private:
         else if (canClaimDraw())
             DrawText("Threefold repetition - press D to claim a draw", 12, GetScreenHeight() - 56, 18, kSelect);
 
-        const char* help = TextFormat("LMB select/move   RMB drag orbit   Wheel zoom   %sR new game   F flip   A auto-rotate [%s]",
-                                      online_ ? "" : "U undo   ", autoRotate_ ? "on" : "off");
+        const char* help = TextFormat("LMB select/move   %sRMB drag orbit   Wheel zoom   %sR new game   F flip   A auto-rotate [%s]",
+                                      battleGame_ ? "E ability   " : "", online_ ? "" : "U undo   ", autoRotate_ ? "on" : "off");
         DrawText(help, 12, GetScreenHeight() - 28, 16, Fade(RAYWHITE, 0.55f));
     }
 
@@ -1220,8 +1497,13 @@ private:
         EndMode3D();
         drawLabels();
         drawHpBars();
-        if (menuOpen_) drawMenu();
-        else drawHud();
+        if (menuOpen_) {
+            drawMenu();
+        } else {
+            drawHud();
+            drawActionPanel();
+            drawEndScreen();
+        }
         EndDrawing();
     }
 };

@@ -102,8 +102,9 @@ std::vector<Event> Battle::act(Command c) {
     const int me = turn_;
     Fighter& self = f_[me];
     Fighter& foe = f_[1 - me];
-    // Guard and Feint last until the fighter's own next turn.
-    self.guard = 0;
+    // Guard and Feint last until the fighter's own next turn. The attacker's first turn keeps a guard
+    // from prepare(), so it still covers the defender's first reply.
+    if (turns_ > 0) self.guard = 0;
     self.evading = false;
     if (!canUse(c)) c = Command::Attack;
     const Stats& st = statsOf(self.type);
@@ -231,6 +232,91 @@ Command Battle::aiChoice() {
     }
     if (hpFrac < 0.25f && roll() < 0.3f) return Command::Guard;
     return Command::Attack;
+}
+
+namespace {
+
+constexpr Ability kAbilities[7] = {
+    {"-", "-"},
+    {"Shield Up", "enter the next battle guarded"},
+    {"Battle Cry", "next battle: first hit +60%"},
+    {"Heal", "adjacent allies regain 25% HP"},
+    {"Fortify", "start the next battle with Bulwark"},
+    {"Inspire", "adjacent allies: next hit +60%"},
+    {"Rest", "heal 30% of max HP"},
+};
+
+int typeAt(const std::array<int8_t, 64>& board, int s) { return board[s] < 0 ? -board[s] : board[s]; }
+
+// Allies on the up to eight squares around s.
+std::vector<int> adjacentAllies(const std::array<int8_t, 64>& board, int s) {
+    std::vector<int> out;
+    for (int dr = -1; dr <= 1; ++dr)
+        for (int df = -1; df <= 1; ++df) {
+            const int r = s / 8 + dr, f = s % 8 + df;
+            if ((dr == 0 && df == 0) || r < 0 || r > 7 || f < 0 || f > 7) continue;
+            const int t = r * 8 + f;
+            if (board[t] != 0 && (board[t] > 0) == (board[s] > 0)) out.push_back(t);
+        }
+    return out;
+}
+
+int healAmount(const std::array<int8_t, 64>& board, const Units& units, int s, int percent) {
+    return std::min(units[s].dmg, maxHp(typeAt(board, s)) * percent / 100);
+}
+
+}  // namespace
+
+const Ability& abilityOf(int type) { return kAbilities[std::clamp(type, 0, 6)]; }
+
+bool abilityUseful(const std::array<int8_t, 64>& board, const Units& units, int s, int ply) {
+    if (board[s] == 0 || abilityWait(units[s], ply) > 0) return false;
+    const Unit& u = units[s];
+    switch (typeAt(board, s)) {
+        case 1: return !(u.buffs & kShield);
+        case 2: return !(u.buffs & kEmpower);
+        case 3:
+            for (int t : adjacentAllies(board, s))
+                if (units[t].dmg > 0) return true;
+            return false;
+        case 4: return !(u.buffs & kBulwark);
+        case 5:
+            for (int t : adjacentAllies(board, s))
+                if (!(units[t].buffs & kEmpower)) return true;
+            return false;
+        case 6: return u.dmg > 0;
+        default: return false;
+    }
+}
+
+std::vector<AbilityEffect> useAbility(const std::array<int8_t, 64>& board, Units& units, int s, int ply) {
+    std::vector<AbilityEffect> out;
+    auto heal = [&](int t, int percent) {
+        const int amount = healAmount(board, units, t, percent);
+        if (amount <= 0) return;
+        units[t].dmg -= amount;
+        out.push_back({t, amount, 0});
+    };
+    auto buff = [&](int t, uint8_t b) {
+        if (units[t].buffs & b) return;
+        units[t].buffs |= b;
+        out.push_back({t, 0, b});
+    };
+    switch (typeAt(board, s)) {
+        case 1: buff(s, kShield); break;
+        case 2: buff(s, kEmpower); break;
+        case 3:
+            for (int t : adjacentAllies(board, s)) heal(t, 25);
+            break;
+        case 4: buff(s, kBulwark); break;
+        case 5:
+            for (int t : adjacentAllies(board, s)) buff(t, kEmpower);
+            break;
+        case 6: heal(s, 30); break;
+        default: return out;
+    }
+    units[s].readyAt = abilityReadyAt(ply);
+    return out;
 }
 
 }  // namespace battle

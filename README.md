@@ -56,11 +56,24 @@ Turn on **Battle mode** in the menu before starting a hotseat or vs-AI game. Eve
 
 Hits can crit (12%, 1.6x, ignores defense). A faster target dodges more often. After 12 turns both sides tire and every hit grows stronger, so no battle lasts forever.
 
+On the board, selecting a piece opens an action panel in the top-right corner: click a highlighted square to move, or use the piece's **ability** (button or E) instead. An ability takes the whole turn and is then unavailable for 3 of that side's turns; it can only be used when it would change something. Buffs show over the piece and are used up by its next battle, whether it attacks or defends.
+
+| Piece | Ability | Effect |
+|---|---|---|
+| Pawn | Shield Up | enters its next battle guarded (half damage until its own next turn) |
+| Knight | Battle Cry | in its next battle, its first hit gets +60% |
+| Bishop | Heal | allies on the 8 surrounding squares regain 25% of their max HP |
+| Rook | Fortify | starts its next battle with Bulwark |
+| Queen | Inspire | allies on the 8 surrounding squares get +60% on their next battle's first hit |
+| King | Rest | heals 30% of its max HP |
+
 - If the attacker wins, the capture happens as normal. If it loses, the attacker is removed, the defender keeps its square and the turn passes.
 - Damage persists: wounded pieces show an HP bar on the board. A pawn that promotes comes back at full HP.
 - King hunt: check rules are off. You may leave your king attacked, and moving onto the enemy king starts a battle like any other capture. Checkmate and stalemate don't end the game; it ends when a king dies in battle (a king that loses while attacking dies too).
 - The toggle applies from the next new game.
-- The AI attacks an enemy king whenever it can, with its healthiest attacker. Otherwise its search plays ordinary chess and doesn't know about battles.
+- The AI attacks an enemy king whenever it can, with its healthiest attacker. Otherwise it uses an ability only when it clearly helps (a bishop healing a neighbour below half HP, or resting a king below half HP); its search plays ordinary chess and doesn't know about battles or buffs.
+- Each duel ends with VICTORY or DEFEAT from your side against the AI, or the winning colour in hotseat. When a king falls (or on checkmate in a normal game), a VICTORY / DEFEAT screen shows battles won, abilities used and pieces lost per side, with Rematch and Menu buttons.
+- Using an ability resets the repetition count, like a capture.
 
 In a battle, choose a command with 1-4, the arrow keys and Enter, or the mouse.
 
@@ -72,6 +85,7 @@ In a battle, choose a command with 1-4, the arrow keys and Enter, or the mouse.
 | Right drag | orbit camera |
 | Wheel | zoom |
 | Esc | cancel the promotion picker |
+| E | use the selected piece's ability (battle mode) |
 | D | claim a draw on threefold repetition |
 | U / Backspace | undo (against the AI: your last move and its reply; not online) |
 | C | copy the room link (online) |
@@ -86,12 +100,12 @@ In a battle, choose a command with 1-4, the arrow keys and Enter, or the mouse.
 - `src/pieces.{hpp,cpp}`: procedural piece meshes
 - `src/shaders.hpp`: lighting shader (GLSL 330 desktop / GLSL 100 web)
 - `src/net.{hpp,cpp}`, `web/net.js`: online rooms; the C++ side calls the PeerJS code in `net.js` (bundled with `--pre-js`) and stubs everything out on desktop
-- `src/battle.{hpp,cpp}`: battle-mode duel rules (no raylib dependency)
-- `src/main.cpp`: app loop, camera, picking, rendering, HUD, online room protocol, battle arena scene
+- `src/battle.{hpp,cpp}`: battle-mode duel rules and board abilities (no raylib dependency)
+- `src/main.cpp`: app loop, camera, picking, rendering, HUD, online room protocol, battle arena scene, action panel, end screen
 - `tests/perft.cpp`: node counts against published perft results
 - `tests/rules.cpp`: which positions count as repeated, UCI move text, battle-mode pseudo-legal moves (walking into check, capturing a king)
 - `tests/ai.cpp`: evaluation symmetry, mates in one, the near-best-move margin, time budget
-- `tests/battle.cpp`: battles end, HP stays in range, separate cooldowns, healing caps, each second skill's effect, rough balance
+- `tests/battle.cpp`: battles end, HP stays in range, separate cooldowns, healing caps, each second skill's effect, rough balance, board buffs entering a battle, board abilities (range, cooldown, caps)
 
 ## Not yet
 

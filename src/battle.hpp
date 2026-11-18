@@ -1,6 +1,7 @@
 #pragma once
 // Turn-based battle fought when one piece captures another in battle mode. No raylib dependency,
 // so it is tested headless; main.cpp only animates the events it returns.
+#include <array>
 #include <cstdint>
 #include <random>
 #include <string>
@@ -59,6 +60,12 @@ public:
         return true;
     }
 
+    // Applies a board buff before the first action: guard 1 (Shield Up) or 2 (Fortify), and an
+    // empowered first hit (Battle Cry, Inspire). A guard set here lasts until the fighter's own next turn.
+    void prepare(int i, int guard, bool empowered) {
+        if (guard > f_[i].guard) f_[i].guard = guard;
+        f_[i].empowered = f_[i].empowered || empowered;
+    }
     // The fighter whose turn it is carries out `c` (a skill falls back to Attack while cooling down).
     std::vector<Event> act(Command c);
     // A simple opponent: heals or guards when hurt, otherwise uses its skills when they are ready.
@@ -78,5 +85,42 @@ private:
     int hit(std::vector<Event>& out, int actor, float power, bool pierce, float missChance);
     void push(std::vector<Event>& out, Event e) const;
 };
+
+// ---- Board abilities ----
+// Instead of moving, a piece may use its ability; that takes the whole turn. Buffs wait on the
+// piece until its next battle (attacking or defending), which uses them up.
+enum Buff : uint8_t { kShield = 1, kBulwark = 2, kEmpower = 4 };
+
+// A piece's battle state on the board. It moves with the piece.
+struct Unit {
+    int dmg = 0;      // HP lost so far
+    int readyAt = 0;  // ply from which the ability can be used again
+    uint8_t buffs = 0;
+};
+using Units = std::array<Unit, 64>;
+
+struct Ability {
+    const char* name;
+    const char* info;
+};
+const Ability& abilityOf(int type);
+
+// Own turns an ability is unavailable after use.
+constexpr int kAbilityCooldown = 3;
+inline int abilityReadyAt(int ply) { return ply + 2 * (kAbilityCooldown + 1); }
+// Own turns left before the ability is ready (0 = ready).
+inline int abilityWait(const Unit& u, int ply) { return u.readyAt > ply ? (u.readyAt - ply + 1) / 2 : 0; }
+
+// board: signed piece codes as in chess::Position::sq (positive = white, |code| = piece type).
+// True when the piece on s is off cooldown and its ability would change something.
+bool abilityUseful(const std::array<int8_t, 64>& board, const Units& units, int s, int ply);
+
+struct AbilityEffect {
+    int square;
+    int healed;     // HP restored (0 if none)
+    uint8_t buff;   // buff added (0 if none)
+};
+// Uses the ability of the piece on s and starts its cooldown. Returns what changed, per square.
+std::vector<AbilityEffect> useAbility(const std::array<int8_t, 64>& board, Units& units, int s, int ply);
 
 }  // namespace battle
