@@ -8,6 +8,7 @@
 #include <climits>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 #include <sstream>
 #include <memory>
 #include <string>
@@ -76,6 +77,8 @@ const Color kLastMove{200, 210, 90, 255};
 const Color kCheck{220, 60, 50, 255};
 const Color kTarget{70, 160, 90, 255};
 const Color kHeal{90, 210, 120, 255};
+const Color kCurse{230, 120, 40, 255};  // debuffs: burn, bleed, exposed, weakened
+const Color kUltimate{250, 190, 60, 255};
 const Color kPanel{24, 26, 48, 235};
 const Color kPanelEdge{200, 200, 230, 255};
 
@@ -328,19 +331,23 @@ private:
     static constexpr uint8_t kAbilityFlag = 0x80;
     static bool isAbility(const Move& m) { return m.flags & kAbilityFlag; }
 
-    bool canUseAbility(int s) const {
-        return battleGame_ && ownPiece(s) && !gameOver() && battle::abilityUseful(pos_.sq, units_, s, ply());
+    // which: 0 = the support ability, 1 = the strike.
+    bool canUseAbility(int s, int which = 0) const {
+        return battleGame_ && ownPiece(s) && !gameOver() && battle::abilityUseful(pos_.sq, units_, s, ply(), which);
     }
 
-    // The piece on s uses its ability instead of moving; the turn passes.
-    void useAbility(int s) {
+    // The piece on s uses an ability instead of moving; the turn passes.
+    void useAbility(int s, int which = 0) {
         Move marker;
         marker.from = marker.to = static_cast<int8_t>(s);
         marker.flags = kAbilityFlag;
         record(marker);
-        for (const battle::AbilityEffect& e : battle::useAbility(pos_.sq, units_, s, ply() - 1)) {
+        for (const battle::AbilityEffect& e : battle::useAbility(pos_.sq, units_, s, ply() - 1, which)) {
             if (e.healed > 0) boardPopups_.push_back({e.square, TextFormat("+%d", e.healed), kHeal});
             if (e.buff) boardPopups_.push_back({e.square, buffName(e.buff), SKYBLUE});
+            if (e.damage > 0) boardPopups_.push_back({e.square, TextFormat("-%d", e.damage), kCheck});
+            for (uint8_t bit = 1; bit <= battle::kCurseWeak; bit <<= 1)
+                if (e.curse & bit) boardPopups_.push_back({e.square, battle::curseName(bit), kCurse});
         }
         pos_.side = pos_.side == White ? Black : White;
         pos_.ep = -1;
@@ -373,6 +380,7 @@ private:
         for (int i = 0; i < 2; ++i) {
             const uint8_t b = units_[i == 0 ? m.from : cap].buffs;
             scene->fight.prepare(i, b & battle::kBulwark ? 2 : b & battle::kShield ? 1 : 0, b & battle::kEmpower);
+            scene->fight.curse(i, units_[i == 0 ? m.from : cap].curses);
         }
         scene->shownHp[0] = scene->fight.fighter(0).hp;
         scene->shownHp[1] = scene->fight.fighter(1).hp;
@@ -388,8 +396,8 @@ private:
         const int left = f.fighter(f.winner()).hp, type = f.fighter(f.winner()).type;
         battle_.reset();
         record(m);
-        units_[m.from].buffs = 0;  // a battle uses up both pieces' buffs
-        units_[capturedSquare(m)].buffs = 0;
+        units_[m.from].buffs = units_[m.from].curses = 0;  // a battle uses up both pieces' buffs and curses
+        units_[capturedSquare(m)].buffs = units_[capturedSquare(m)].curses = 0;
         if (attackerWon) {
             units_[m.from].dmg = battle::maxHp(type) - left;
             advance(m);
@@ -587,9 +595,10 @@ private:
     }
 
     // The search doesn't know about abilities. Use one only when it clearly helps: a bishop healing
-    // a badly wounded neighbour, or a badly wounded king resting.
-    bool aiAbility(int& out) const {
+    // a badly wounded neighbour, a badly wounded king resting, or a strike that lands hard.
+    bool aiAbility(int& out, int& which) const {
         if (!battleGame_) return false;
+        which = 0;
         auto badlyHurt = [&](int s) { return hpAt(s) * 2 < battle::maxHp(typeOf(pos_.sq[s])); };
         for (int s = 0; s < 64; ++s) {
             if (!canUseAbility(s)) continue;
@@ -605,7 +614,22 @@ private:
                 return true;
             }
         }
-        return false;
+        // Strikes: try each on a copy of the board state and keep the best, if it is worth a turn.
+        constexpr int kWorthIt = 14;  // about one solid hit; each new curse counts as 6
+        int best = kWorthIt - 1;
+        for (int s = 0; s < 64; ++s) {
+            if (!canUseAbility(s, 1)) continue;
+            battle::Units trial = units_;
+            int score = 0;
+            for (const battle::AbilityEffect& e : battle::useAbility(pos_.sq, trial, s, ply(), 1))
+                score += e.damage + 6 * __builtin_popcount(e.curse);
+            if (score > best) {
+                best = score;
+                out = s;
+                which = 1;
+            }
+        }
+        return which == 1;
     }
 
     void updateAi() {
@@ -615,9 +639,9 @@ private:
             if (animT_ >= 1) perform(forced);
             return;
         }
-        int ability = -1;
-        if (!aiStarted_ && aiAbility(ability)) {
-            if (animT_ >= 1) useAbility(ability);
+        int ability = -1, which = 0;
+        if (!aiStarted_ && aiAbility(ability, which)) {
+            if (animT_ >= 1) useAbility(ability, which);
             return;
         }
         if (!aiStarted_) {
@@ -734,13 +758,14 @@ private:
 
     // Top-right corner, where it hides the fewest squares (next to the piece it covered move targets).
     Rectangle panelRect() const {
-        const float w = 300, h = 132;
+        const float w = 300, h = 194;
         return {fmaxf(12, GetScreenWidth() - w - 12), 12, w, h};
     }
 
-    Rectangle abilityButton() const {
+    // which 0 = support ability (E), 1 = strike (Q), stacked at the bottom of the panel.
+    Rectangle abilityButton(int which) const {
         const Rectangle r = panelRect();
-        return {r.x + 10, r.y + r.height - 62, r.width - 20, 52};
+        return {r.x + 10, r.y + r.height - 124 + which * 62, r.width - 20, 52};
     }
 
     // ---- End screen ----
@@ -864,11 +889,15 @@ private:
 
         if (panelOpen()) {
             const Vector2 mouse = cursorPosition();
-            if (canUseAbility(selected_) && (IsKeyPressed(KEY_E) || (click && CheckCollisionPointRec(mouse, abilityButton())))) {
-                useAbility(selected_);
-                return;
+            for (int which = 0; which < 2; ++which) {
+                const int key = which == 0 ? KEY_E : KEY_Q;
+                const bool over = CheckCollisionPointRec(mouse, abilityButton(which));
+                if (canUseAbility(selected_, which) && (IsKeyPressed(key) || (click && over))) {
+                    useAbility(selected_, which);
+                    return;
+                }
+                if (over) return;  // a disabled button still eats the click
             }
-            if (CheckCollisionPointRec(mouse, abilityButton())) return;  // a disabled button still eats the click
         }
 
         const Ray ray = GetScreenToWorldRay(cursorPosition(), camera_);
@@ -907,15 +936,24 @@ private:
 
     bool aiFighter(int i) const { return vsAi_ && (battle_->fight.fighter(i).white ? White : Black) != human_; }
 
+    // Burn, Bleed, Stunned, Weakened and Exposed are bad for whoever carries them.
+    static bool debuffTag(const char* tag) {
+        using S = battle::Status;
+        for (S s : {S::Burn, S::Bleed, S::Stun, S::AtkDown, S::DefDown})
+            if (std::strcmp(tag, battle::statusName(s)) == 0) return true;
+        return false;
+    }
+
     static float eventSeconds(const battle::Event& e) {
         return e.kind == battle::Event::Announce || e.kind == battle::Event::Status ? kBattleEventSeconds * 0.65f : kBattleEventSeconds;
     }
 
-    // Bottom command menu: a 2x2 grid in battle::Command order.
+    // Bottom command menu: a 2x2 grid in battle::Command order, with the Ultimate (4) as a bar above it.
     Rectangle commandRect(int i) const {
-        const float total = fminf(GetScreenWidth() - 32.0f, 920), gap = 8, h = 60;
+        const float total = fminf(GetScreenWidth() - 32.0f, 920), gap = 8, h = 60, ultH = 40;
         const float w = (total - gap) / 2;
         const float x0 = (GetScreenWidth() - total) / 2, y0 = GetScreenHeight() - 16 - 2 * h - gap;
+        if (i == 4) return {x0, y0 - gap - ultH, total, ultH};
         return {x0 + (i % 2) * (w + gap), y0 + (i / 2) * (h + gap), w, h};
     }
 
@@ -925,6 +963,7 @@ private:
             case 0: return "Attack";
             case 1: return st.skill;
             case 2: return st.skill2;
+            case 4: return st.ultimate;
             default: return "Guard";
         }
     }
@@ -935,6 +974,7 @@ private:
             case 0: return "1.0x power";
             case 1: return st.skillInfo;
             case 2: return st.skill2Info;
+            case 4: return st.ultimateInfo;
             default: return "half damage until your next turn, heal 5%";
         }
     }
@@ -971,9 +1011,10 @@ private:
                 using K = battle::Event;
                 if (e.kind == K::Hit) b.popups.push_back({e.target, TextFormat(e.crit ? "%d!" : "%d", e.amount), e.crit ? kSelect : RAYWHITE});
                 if (e.kind == K::Miss) b.popups.push_back({e.target, "MISS", Fade(RAYWHITE, 0.7f)});
+                if (e.kind == K::Tick) b.popups.push_back({e.target, TextFormat("%d", e.amount), kCurse});
                 if ((e.kind == K::Heal || e.kind == K::Guard) && e.amount > 0) b.popups.push_back({e.target, TextFormat("+%d", e.amount), kHeal});
                 // A tag follows a heal number a moment later so the two don't overlap.
-                if (e.tag) b.popups.push_back({e.target, e.tag, e.kind == K::Status ? kCheck : SKYBLUE, e.amount > 0 ? -0.35f : 0.0f});
+                if (e.tag) b.popups.push_back({e.target, e.tag, debuffTag(e.tag) ? kCurse : SKYBLUE, e.amount > 0 ? -0.35f : 0.0f});
             }
             if (b.eventT >= eventSeconds(e)) {
                 ++b.next;
@@ -997,10 +1038,13 @@ private:
             return;
         }
         int chosen = -1;
-        if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_RIGHT)) b.cursor ^= 1;
-        if (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_DOWN)) b.cursor ^= 2;
+        // Cursor: 0 1 / 2 3 grid, with the Ultimate bar (4) above the top row.
+        if (b.cursor < 4 && (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_RIGHT))) b.cursor ^= 1;
+        if (IsKeyPressed(KEY_UP)) b.cursor = b.cursor >= 2 && b.cursor < 4 ? b.cursor - 2 : 4;
+        if (IsKeyPressed(KEY_DOWN)) b.cursor = b.cursor == 4 ? 0 : b.cursor < 2 ? b.cursor + 2 : b.cursor;
         if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)) chosen = b.cursor;
-        for (int i = 0; i < 4; ++i) {
+        if (IsKeyPressed(KEY_U)) chosen = 4;
+        for (int i = 0; i < 5; ++i) {
             if (IsKeyPressed(KEY_ONE + i)) chosen = i;
             if (CheckCollisionPointRec(cursorPosition(), commandRect(i))) {
                 b.cursor = i;
@@ -1047,6 +1091,7 @@ private:
                 c = mix(c, kCheck, 0.7f * (1 - t));
             }
             if (e.target == i && e.kind == K::Miss && t > 0.3f) at.z += sinf(PI * (t - 0.3f) / 0.7f) * 0.7f;
+            if (e.target == i && e.kind == K::Tick) c = mix(c, kCurse, 0.6f * sinf(PI * t));
             if (e.actor == i && (e.kind == K::Heal || e.kind == K::Guard))
                 c = mix(c, e.kind == K::Heal ? kHeal : SKYBLUE, 0.6f * sinf(PI * t));
         }
@@ -1115,18 +1160,30 @@ private:
                      active ? kSelect : RAYWHITE);
             drawHpBar(x, p.y - 22, w, 12, b.shownHp[i], max);
             DrawRectangleLines(static_cast<int>(x) - 1, static_cast<int>(p.y) - 23, static_cast<int>(w) + 2, 14, Fade(RAYWHITE, 0.5f));
+            // Ultimate charge: a thin gold bar under the HP bar.
+            const float charge = static_cast<float>(f.charge) / battle::kUltimateCharge;
+            DrawRectangle(static_cast<int>(x), static_cast<int>(p.y - 9), static_cast<int>(w), 3, Fade(BLACK, 0.7f));
+            DrawRectangle(static_cast<int>(x), static_cast<int>(p.y - 9), static_cast<int>(w * charge), 3,
+                          charge >= 1 ? mix(kUltimate, RAYWHITE, 0.5f + 0.5f * sinf(static_cast<float>(GetTime()) * 8)) : kUltimate);
             const char* hp = TextFormat("%d/%d", b.shownHp[i], max);
-            DrawText(hp, static_cast<int>(p.x) - MeasureText(hp, 16) / 2, static_cast<int>(p.y - 6), 16, RAYWHITE);
-            std::string tags;
-            if (f.guard == 2) tags += "BULWARK  ";
-            if (f.guard == 1) tags += "GUARD  ";
-            if (f.evading) tags += "EVADE  ";
-            if (f.empowered) tags += "EMPOWERED  ";
-            if (f.weakened) tags += "WEAKENED  ";
-            if (!tags.empty()) {
-                tags.resize(tags.size() - 2);
-                DrawText(tags.c_str(), static_cast<int>(p.x) - MeasureText(tags.c_str(), 14) / 2, static_cast<int>(p.y - 64), 14,
-                         f.weakened ? kCheck : SKYBLUE);
+            DrawText(hp, static_cast<int>(p.x) - MeasureText(hp, 16) / 2, static_cast<int>(p.y - 4), 16, RAYWHITE);
+            // Buffs on one line, debuffs (with turns left) on the line above.
+            std::string buffs, debuffs;
+            if (f.guard == 2) buffs += "BULWARK  ";
+            if (f.guard == 1) buffs += "GUARD  ";
+            if (f.evading) buffs += "EVADE  ";
+            if (f.empowered) buffs += "EMPOWERED  ";
+            for (int k = 0; k < battle::kStatusCount; ++k) {
+                if (f.status[k] <= 0) continue;
+                const char* name = battle::statusName(static_cast<battle::Status>(k));
+                (debuffTag(name) ? debuffs : buffs) += TextFormat("%s %d  ", name, f.status[k]);
+            }
+            int lineY = static_cast<int>(p.y - 64);
+            for (auto [text, color] : {std::pair{&buffs, SKYBLUE}, std::pair{&debuffs, kCurse}}) {
+                if (text->empty()) continue;
+                text->resize(text->size() - 2);
+                DrawText(text->c_str(), static_cast<int>(p.x) - MeasureText(text->c_str(), 14) / 2, lineY, 14, color);
+                lineY -= 17;
             }
         }
 
@@ -1156,15 +1213,26 @@ private:
         // Command menu.
         const bool live = awaitingHuman();
         const battle::Fighter& actor = b.fight.fighter(b.fight.turn());
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 5; ++i) {
             const Rectangle r = commandRect(i);
             const bool usable = b.fight.canUse(static_cast<battle::Command>(i));
             const bool hot = live && i == b.cursor && usable;
-            DrawRectangleRounded(r, 0.2f, 6, hot ? mix(kPanel, kSelect, 0.35f) : kPanel);
+            const Color accent = i == 4 ? kUltimate : kSelect;
+            DrawRectangleRounded(r, 0.2f, 6, hot ? mix(kPanel, accent, 0.35f) : kPanel);
+            const Color text = !live ? Fade(RAYWHITE, 0.35f) : usable ? RAYWHITE : Fade(RAYWHITE, 0.4f);
+            if (i == 4) {
+                // The bar fills as the fighter charges; full, it glows.
+                const float k = static_cast<float>(actor.charge) / battle::kUltimateCharge;
+                DrawRectangleRounded({r.x, r.y, r.width * k, r.height}, 0.2f, 6, Fade(kUltimate, usable ? 0.45f : 0.2f));
+                DrawRectangleRoundedLinesEx(r, 0.2f, 6, 2, hot || (live && usable) ? kUltimate : Fade(kPanelEdge, live ? 1.0f : 0.35f));
+                std::string label = TextFormat("5  ULTIMATE: %s", commandLabel(i, actor.type).c_str());
+                label += usable ? std::string("  -  ") + commandInfo(i, actor.type) : TextFormat("  (charging %d%%)", actor.charge);
+                DrawText(label.c_str(), static_cast<int>(r.x + 14), static_cast<int>(r.y + 10), 20, text);
+                continue;
+            }
             DrawRectangleRoundedLinesEx(r, 0.2f, 6, 2, hot ? kSelect : Fade(kPanelEdge, live ? 1.0f : 0.35f));
             std::string label = TextFormat("%d  %s", i + 1, commandLabel(i, actor.type).c_str());
-            if (!usable) label += TextFormat("  (ready in %d)", actor.cooldown[i - 1]);
-            const Color text = !live ? Fade(RAYWHITE, 0.35f) : usable ? RAYWHITE : Fade(RAYWHITE, 0.4f);
+            if (!usable && (i == 1 || i == 2)) label += TextFormat("  (ready in %d)", actor.cooldown[i - 1]);
             DrawText(label.c_str(), static_cast<int>(r.x + 14), static_cast<int>(r.y + 9), 20, text);
             DrawText(commandInfo(i, actor.type), static_cast<int>(r.x + 38), static_cast<int>(r.y + 35), 16, Fade(text, 0.7f));
         }
@@ -1188,6 +1256,13 @@ private:
         }
     }
 
+    static std::string curseTags(uint8_t c) {
+        std::string out;
+        for (uint8_t bit = 1; bit <= battle::kCurseWeak; bit <<= 1)
+            if (c & bit) out += std::string(out.empty() ? "" : " ") + battle::curseName(bit);
+        return out;
+    }
+
     static std::string buffTags(uint8_t b) {
         std::string out;
         for (uint8_t f : {battle::kShield, battle::kBulwark, battle::kEmpower})
@@ -1209,20 +1284,25 @@ private:
         const std::string tags = buffTags(units_[selected_].buffs);
         const char* right = tags.empty() ? "move: click a square" : tags.c_str();
         DrawText(right, x + static_cast<int>(r.width) - 12 - MeasureText(right, 14), y + 56, 14, tags.empty() ? Fade(RAYWHITE, 0.5f) : SKYBLUE);
+        const std::string curses = curseTags(units_[selected_].curses);
+        if (!curses.empty()) DrawText(curses.c_str(), x + 12, y + 74, 14, kCurse);
 
-        const Rectangle btn = abilityButton();
-        const bool ready = canUseAbility(selected_);
-        const bool hot = ready && CheckCollisionPointRec(cursorPosition(), btn);
-        DrawRectangleRounded(btn, 0.2f, 6, hot ? mix(kPanel, kSelect, 0.35f) : mix(kPanel, BLACK, 0.3f));
-        DrawRectangleRoundedLinesEx(btn, 0.2f, 6, 2, ready ? kSelect : Fade(kPanelEdge, 0.35f));
-        const battle::Ability& a = battle::abilityOf(type);
-        const int wait = battle::abilityWait(units_[selected_], ply());
-        std::string label = std::string("E  ") + a.name;
-        if (wait > 0) label += TextFormat("  (ready in %d)", wait);
-        else if (!ready) label += "  (no effect now)";
-        const Color text = ready ? RAYWHITE : Fade(RAYWHITE, 0.4f);
-        DrawText(label.c_str(), static_cast<int>(btn.x + 12), static_cast<int>(btn.y + 7), 20, text);
-        DrawText(a.info, static_cast<int>(btn.x + 34), static_cast<int>(btn.y + 31), 16, Fade(text, 0.7f));
+        for (int which = 0; which < 2; ++which) {
+            const Rectangle btn = abilityButton(which);
+            const bool ready = canUseAbility(selected_, which);
+            const bool hot = ready && CheckCollisionPointRec(cursorPosition(), btn);
+            const Color accent = which == 0 ? kSelect : kCurse;
+            DrawRectangleRounded(btn, 0.2f, 6, hot ? mix(kPanel, accent, 0.35f) : mix(kPanel, BLACK, 0.3f));
+            DrawRectangleRoundedLinesEx(btn, 0.2f, 6, 2, ready ? accent : Fade(kPanelEdge, 0.35f));
+            const battle::Ability& a = battle::abilityOf(type, which);
+            const int wait = battle::abilityWait(units_[selected_], ply(), which);
+            std::string label = std::string(which == 0 ? "E  " : "Q  ") + a.name;
+            if (wait > 0) label += TextFormat("  (ready in %d)", wait);
+            else if (!ready) label += which == 0 ? "  (no effect now)" : "  (no target)";
+            const Color text = ready ? RAYWHITE : Fade(RAYWHITE, 0.4f);
+            DrawText(label.c_str(), static_cast<int>(btn.x + 12), static_cast<int>(btn.y + 7), 20, text);
+            DrawText(a.info, static_cast<int>(btn.x + 34), static_cast<int>(btn.y + 31), 16, Fade(text, 0.7f));
+        }
     }
 
     void drawEndScreen() {
@@ -1288,7 +1368,7 @@ private:
         if (!battleGame_) return;
         for (int s = 0; s < 64; ++s) {
             const battle::Unit& u = units_[s];
-            if (pos_.sq[s] == EMPTY || (u.dmg <= 0 && !u.buffs)) continue;
+            if (pos_.sq[s] == EMPTY || (u.dmg <= 0 && !u.buffs && !u.curses)) continue;
             Vector3 at = squareCenter(s);
             at.y = 1.5f;
             const Vector2 p = GetWorldToScreen(at, camera_);
@@ -1296,6 +1376,10 @@ private:
             const std::string tags = buffTags(u.buffs);
             if (!tags.empty())
                 DrawText(tags.c_str(), static_cast<int>(p.x) - MeasureText(tags.c_str(), 12) / 2, static_cast<int>(p.y) - 15, 12, SKYBLUE);
+            const std::string curses = curseTags(u.curses);
+            if (!curses.empty())
+                DrawText(curses.c_str(), static_cast<int>(p.x) - MeasureText(curses.c_str(), 12) / 2,
+                         static_cast<int>(p.y) - (tags.empty() ? 15 : 29), 12, kCurse);
         }
         for (const BoardPopup& pop : boardPopups_) {
             Vector3 at = squareCenter(pop.square);
@@ -1437,7 +1521,7 @@ private:
             DrawText("Threefold repetition - press D to claim a draw", 12, GetScreenHeight() - 56, 18, kSelect);
 
         const char* help = TextFormat("LMB select/move   %sRMB drag orbit   Wheel zoom   %sR new game   F flip   A auto-rotate [%s]",
-                                      battleGame_ ? "E ability   " : "", online_ ? "" : "U undo   ", autoRotate_ ? "on" : "off");
+                                      battleGame_ ? "E ability  Q strike   " : "", online_ ? "" : "U undo   ", autoRotate_ ? "on" : "off");
         DrawText(help, 12, GetScreenHeight() - 28, 16, Fade(RAYWHITE, 0.55f));
     }
 
