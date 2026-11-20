@@ -1,4 +1,4 @@
-#include "battle.hpp"
+#include "battle/battle.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -60,7 +60,7 @@ const char* curseName(uint8_t bit) {
 }
 
 Battle::Battle(int attackerType, bool attackerWhite, int attackerHp, int defenderType, int defenderHp, uint32_t seed)
-    : rng_(seed) {
+    : rng_(seed), aiRng_(seed ^ 0xA5A5A5A5u) {
     f_[0].type = attackerType;
     f_[0].white = attackerWhite;
     f_[0].hp = std::clamp(attackerHp, 1, maxHp(attackerType));
@@ -354,19 +354,19 @@ Command Battle::aiChoice() {
     switch (self.type) {
         case 1:  // Pawn: rally when hurt, otherwise gamble on the strike
             if (ready2 && (!self.empowered || dot) && hpFrac < 0.6f) return Command::Skill2;
-            if (ready1 && (self.empowered || roll() < 0.5f)) return Command::Skill;
+            if (ready1 && (self.empowered || unit(aiRng_) < 0.5f)) return Command::Skill;
             break;
         case 2:  // Knight: leap in, feint now and then
             if (ready1) return Command::Skill;
-            if (ready2 && roll() < 0.5f) return Command::Skill2;
+            if (ready2 && unit(aiRng_) < 0.5f) return Command::Skill2;
             break;
         case 3:  // Bishop: heal when hurt, otherwise drain
             if (ready1 && (hpFrac < 0.5f || (dot && hpFrac < 0.6f))) return Command::Skill;
             if (ready2) return Command::Skill2;
             break;
         case 4:  // Rook: ram or brace
-            if (ready2 && roll() < 0.5f) return Command::Skill2;
-            if (ready1 && roll() < 0.5f) return Command::Skill;
+            if (ready2 && unit(aiRng_) < 0.5f) return Command::Skill2;
+            if (ready1 && unit(aiRng_) < 0.5f) return Command::Skill;
             break;
         case 5:  // Queen: storm, then dominate
             if (ready1) return Command::Skill;
@@ -377,7 +377,7 @@ Command Battle::aiChoice() {
             if (ready1) return Command::Skill;
             break;
     }
-    if (hpFrac < 0.25f && roll() < 0.3f) return Command::Guard;
+    if (hpFrac < 0.25f && unit(aiRng_) < 0.3f) return Command::Guard;
     return Command::Attack;
 }
 

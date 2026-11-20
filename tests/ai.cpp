@@ -1,18 +1,12 @@
 // Engine sanity checks: evaluation symmetry and a few positions with one clearly right move.
 #include <cstdio>
 
-#include "ai.hpp"
+#include "ai/ai.hpp"
+#include "check.hpp"
 
 using namespace chess;
 
 namespace {
-
-int failures = 0;
-
-void expect(bool ok, const char* what) {
-    std::printf("%s  %s\n", ok ? "ok  " : "FAIL", what);
-    if (!ok) ++failures;
-}
 
 // Same position with the colours swapped and the board flipped; its evaluation must match.
 Position mirrored(const Position& p) {

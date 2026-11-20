@@ -17,14 +17,17 @@ FetchContent_Declare(raylib
 FetchContent_MakeAvailable(raylib)
 
 # Chess rules and battle mode have no raylib dependency so they can be tested headless.
-add_library(chess STATIC src/chess.cpp src/ai.cpp src/battle.cpp)
+add_library(chess STATIC src/chess/chess.cpp src/ai/ai.cpp src/battle/battle.cpp src/game/game.cpp)
 target_include_directories(chess PUBLIC src)
 
 if(EMSCRIPTEN)
   set(CMAKE_EXECUTABLE_SUFFIX ".html")
 endif()
 
-add_executable(chess3d src/main.cpp src/pieces.cpp src/net.cpp)
+add_executable(chess3d src/main.cpp
+  src/app/app.cpp src/render/pieces.cpp src/render/board_view.cpp src/ui/hud.cpp
+  src/battle/battle_scene.cpp src/net/net.cpp src/net/online.cpp)
+target_include_directories(chess3d PRIVATE src)
 target_link_libraries(chess3d PRIVATE chess raylib)
 
 if(EMSCRIPTEN)
@@ -47,4 +50,7 @@ else()
   add_executable(battle_test tests/battle.cpp)
   target_link_libraries(battle_test PRIVATE chess)
   add_test(NAME battle COMMAND battle_test)
+  add_executable(game_test tests/game.cpp)
+  target_link_libraries(game_test PRIVATE chess)
+  add_test(NAME game COMMAND game_test)
 endif()

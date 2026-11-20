@@ -1,4 +1,4 @@
-// Online play over WebRTC (PeerJS). Bundled into index.js with --pre-js; src/net.cpp calls in.
+// Online play over WebRTC (PeerJS). Bundled into index.js with --pre-js; src/net/net.cpp calls in.
 // The host registers the peer id "chess3d-<CODE>" on the public PeerJS server and the guest
 // connects to it; after that the two browsers talk directly. C++ reads everything through
 // poll(): game messages as sent, and connection events as lines starting with "@".

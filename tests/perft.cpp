@@ -1,6 +1,6 @@
 // Move-generator check against published perft node counts
 // (https://www.chessprogramming.org/Perft_Results).
-#include "chess.hpp"
+#include "chess/chess.hpp"
 
 #include <cstdint>
 #include <cstdio>

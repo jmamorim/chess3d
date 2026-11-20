@@ -1,10 +1,10 @@
-#include "pieces.hpp"
+#include "render/pieces.hpp"
 
 #include <raymath.h>
 
 #include <cmath>
 
-#include "chess.hpp"
+#include "chess/chess.hpp"
 
 namespace {
 

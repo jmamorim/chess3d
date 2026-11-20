@@ -1,4 +1,4 @@
-#include "net.hpp"
+#include "net/net.hpp"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten/emscripten.h>

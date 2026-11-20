@@ -1,6 +1,6 @@
 #pragma once
 // Turn-based battle fought when one piece captures another in battle mode. No raylib dependency,
-// so it is tested headless; main.cpp only animates the events it returns.
+// so it is tested headless; the app only animates the events it returns.
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -93,8 +93,11 @@ private:
     int turn_ = 0;
     int turns_ = 0;  // actions taken so far
     std::mt19937 rng_;
+    std::mt19937 aiRng_;  // separate stream so asking the AI never shifts the dice (replays stay exact)
 
-    float roll() { return std::uniform_real_distribution<float>(0, 1)(rng_); }
+    // Not std::uniform_real_distribution: its output is implementation-defined, mt19937's is not.
+    static float unit(std::mt19937& g) { return (g() >> 8) * (1.0f / 16777216.0f); }
+    float roll() { return unit(rng_); }
     std::string label(int i) const;
     // Returns the damage dealt (0 on a miss).
     // `sure` never misses and ignores guard, evade and Haste.

@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-#include "chess.hpp"
+#include "chess/chess.hpp"
 
 namespace chess {
 

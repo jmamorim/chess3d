@@ -1,4 +1,4 @@
-#include "chess.hpp"
+#include "chess/chess.hpp"
 
 #include <cctype>
 #include <sstream>

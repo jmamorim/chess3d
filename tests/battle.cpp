@@ -2,19 +2,13 @@
 #include <algorithm>
 #include <cstdio>
 
-#include "battle.hpp"
-#include "chess.hpp"
+#include "battle/battle.hpp"
+#include "chess/chess.hpp"
+#include "check.hpp"
 
 using namespace battle;
 
 namespace {
-
-int failures = 0;
-
-void expect(bool ok, const char* what) {
-    std::printf("%s  %s\n", ok ? "ok  " : "FAIL", what);
-    if (!ok) ++failures;
-}
 
 // Plays a battle out with both sides on the AI; returns the winner, or -1 if it ran too long.
 int fight(int a, int aHp, int d, int dHp, uint32_t seed, bool* hpInRange = nullptr) {

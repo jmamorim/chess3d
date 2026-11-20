@@ -1,18 +1,12 @@
 // Checks the repetition key: which positions count as "the same" (FIDE art. 9.2).
 #include <cstdio>
 
-#include "chess.hpp"
+#include "chess/chess.hpp"
+#include "check.hpp"
 
 using namespace chess;
 
 namespace {
-
-int failures = 0;
-
-void expect(bool ok, const char* what) {
-    std::printf("%s  %s\n", ok ? "ok  " : "FAIL", what);
-    if (!ok) ++failures;
-}
 
 Position play(Position p, int from, int to) {
     for (const Move& m : p.legalMoves())
