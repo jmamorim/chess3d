@@ -363,5 +363,45 @@ int main() {
         expect(!abilityUseful(bd, un, 27, 0, 1), "a strike is useless once the curse is already present");
     }
 
+    {
+        // Every event names the command that produced it; start-of-turn ticks carry -1.
+        bool tagged = true, ticksUntagged = true, fellBack = true;
+        int ticks = 0;
+        for (int type = 1; type <= 6; ++type)
+            for (int cmd = 0; cmd < 5; ++cmd) {
+                Battle b(type, true, maxHp(type), 6, 1000, 7);
+                if (cmd == 4) chargeUp(b);
+                else if (b.turn() != 0) b.act(Command::Guard);
+                for (const Event& e : b.act(static_cast<Command>(cmd))) tagged = tagged && e.move == cmd;
+                // The reply may start with a Tick; the rest of it is the defender's own command (Attack).
+                for (const Event& e : b.act(Command::Attack)) {
+                    if (e.kind == Event::Tick) {
+                        ++ticks;
+                        ticksUntagged = ticksUntagged && e.move == -1;
+                    } else if (e.kind != Event::Status && e.kind != Event::Heal) {
+                        tagged = tagged && e.move == 0;
+                    }
+                }
+            }
+        // A skill used again while cooling down falls back to Attack, and its events say so.
+        Battle c(2, true, 60, 6, 1000, 3);
+        c.act(Command::Skill);
+        c.act(Command::Guard);
+        for (const Event& e : c.act(Command::Skill)) fellBack = fellBack && e.move == 0;
+        expect(tagged, "events carry the command that produced them");
+        expect(fellBack, "a skill on cooldown reports Attack");
+        // A Knight's Leap Strike bleeds the king, so its next turn opens with a Bleed tick.
+        for (uint32_t seed = 1; seed < 40 && ticks == 0; ++seed) {
+            Battle d(2, true, 60, 6, 1000, seed);
+            d.act(Command::Skill);
+            for (const Event& e : d.act(Command::Guard))
+                if (e.kind == Event::Tick) {
+                    ++ticks;
+                    ticksUntagged = ticksUntagged && e.move == -1;
+                }
+        }
+        expect(ticks > 0 && ticksUntagged, "Tick events carry -1");
+    }
+
     return failures == 0 ? 0 : 1;
 }

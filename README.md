@@ -51,6 +51,7 @@ Turn on **Battle mode** in the menu before starting a hotseat, vs-AI or online g
 | Right drag | orbit camera |
 | Wheel | zoom |
 | Esc | cancel the promotion picker |
+| Space | fast-forward a battle animation |
 | E | use the selected piece's support ability (battle mode) |
 | Q | use the selected piece's strike (battle mode) |
 | D | claim a draw on threefold repetition |
@@ -65,9 +66,9 @@ Turn on **Battle mode** in the menu before starting a hotseat, vs-AI or online g
 - `src/chess/`: `chess.{hpp,cpp}`, the rules engine (no raylib dependency), with move generation verified by perft
 - `src/ai/`: `ai.{hpp,cpp}`, the AI opponent: alpha-beta with quiescence, piece-square tables, a time budget per level, an optional margin for picking a random near-best move (the easier levels), and an explicit stack so it searches a few ms per frame instead of freezing the page
 - `src/game/`: `game.{hpp,cpp}`, headless game state (position, battle units, history, pending battle) with a text record that replays exactly; the online protocol sends it
-- `src/battle/`: `battle.{hpp,cpp}`, battle-mode duel rules and board abilities (no raylib dependency); `battle_scene.cpp`, the arena: animation, command input and drawing
+- `src/battle/`: `battle.{hpp,cpp}`, battle-mode duel rules and board abilities (no raylib dependency); `battle_scene.cpp`, the arena: animation, command input and drawing; `battle_fx.cpp`, per-ability choreography (poses, particles, status loops, board ability effects)
 - `src/net/`: `net.{hpp,cpp}`, the bridge to the PeerJS code in `web/net.js` (bundled with `--pre-js`), stubbed out on desktop; `online.cpp`, room protocol: turn/cmd/sync messages, saving and resuming a room
-- `src/render/`: `pieces.{hpp,cpp}`, procedural piece meshes; `shaders.hpp`, the lighting shader (GLSL 330 desktop / GLSL 100 web); `board_view.cpp`, board, pieces, promotion picker, labels and the HP bars over pieces
+- `src/render/`: `pieces.{hpp,cpp}`, procedural piece meshes; `shaders.hpp`, the lighting shader (GLSL 330 desktop / GLSL 100 web); `fx.{hpp,cpp}`, the particle/ring/beam system behind the battle and board ability animations; `board_view.cpp`, board, pieces, promotion picker, labels and the HP bars over pieces
 - `src/ui/`: `hud.cpp`, the menu, room-code input, HUD, action panel and end screen
 - `src/app/`: `app.hpp`, the `App` class (all state and member declarations); `app.cpp`, game flow, the AI player, the update loop and draw dispatcher, pointer handling
 - `src/main.cpp`: window setup and the main loop

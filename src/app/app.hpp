@@ -15,6 +15,7 @@
 #include "battle/battle.hpp"
 #include "chess/chess.hpp"
 #include "game/game.hpp"
+#include "render/fx.hpp"
 #include "render/pieces.hpp"
 
 using namespace chess;
@@ -89,6 +90,23 @@ private:
         Color color;
         float t = 0;
     };
+    // A run of consecutive events of one Ultimate: it gets the cinematic treatment.
+    struct UltRun {
+        int first, last, lastHit;  // queue indices; lastHit = -1 when nothing lands
+        float total;               // seconds
+    };
+    // How a fighter is moved and tinted while an event plays (see battle_fx.cpp).
+    struct Pose {
+        Vector3 off{0, 0, 0};
+        float yaw = 0, tilt = 0, scale = 1, alpha = 1, flash = 0, tintAmt = 0;
+        Color tint = WHITE;
+        int ghosts = 0;  // translucent afterimages trailing the fighter
+    };
+    // The ability an event belongs to: the acting fighter's type plus its command (0 once a Bulwark counter-strike).
+    struct Beat {
+        int type, move, hitIdx;  // hitIdx: how many hits of this action came before it
+        bool counter;
+    };
     // Only the presentation of game_.pending(); a scene exists exactly while a battle is pending.
     struct BattleScene {
         std::vector<battle::Event> queue;
@@ -98,11 +116,21 @@ private:
         int shownHp[2] = {0, 0};
         float introT = 0, outroT = 0, aiT = 0;
         int cursor = 0;  // highlighted command
+        std::vector<float> dur;  // seconds each queued event plays (Ultimates are stretched to ~2 s)
+        std::vector<int> runOf;  // index into runs for an Ultimate's events, else -1
+        std::vector<UltRun> runs;
+        bool started = false;    // queue[next]'s effects have been spawned
+        float speed = 1;         // fast-forward multiplier for the queued events
+        float shake = 0, flash = 0;  // screen shake (world units) and white flash (alpha), both decay
+        float camBlend = 0;      // 0 normal framing .. 1 pushed in on camActor
+        int camActor = 0;
+        float ambientT[2] = {0, 0};  // status particle timers per fighter
         std::vector<Popup> popups;
         std::deque<int> remote;  // opponent commands received but not yet applied (the queue is still animating)
     };
     std::unique_ptr<BattleScene> battle_;
     std::array<float, 7> pieceTops_{};
+    Fx arenaFx_, boardFx_;
 
     Camera3D camera_{};
     float yaw_ = 0, targetYaw_ = 0, pitch_ = 0.85f, dist_ = 11.5f;
@@ -218,6 +246,7 @@ private:
     std::string fighterName(int i) const;
     static bool debuffTag(const char* tag);
     static float eventSeconds(const battle::Event& e);
+    bool animatingBattle() const;
     Rectangle commandRect(int i) const;
     static std::string commandLabel(int i, int type);
     static const char* commandInfo(int i, int type);
@@ -229,6 +258,16 @@ private:
     Vector3 drawFighter(int i);
     void drawPanel(Rectangle r) const;
     void drawBattle();
+
+    // ---- defined in battle_fx.cpp ----
+    Beat beat(size_t idx) const;
+    float runElapsed(size_t idx, float t) const;
+    Vector3 fighterMid(int i);
+    Pose eventPose(int i, size_t idx, float t);
+    void startEvent();
+    void ambientFx(float dt);
+    void shakeArena(float amount);
+    void boardAbilityFx(int s, int which, int type, const std::vector<battle::AbilityEffect>& effects);
 
     // ---- defined in hud.cpp ----
     std::vector<Button> menuButtons() const;
@@ -256,7 +295,7 @@ private:
     Color squareColor(int s) const;
     void drawBoard();
     void drawPieces();
-    void drawPiece(int type, Vector3 at, float rotY, Color c, float scale = 1);
+    void drawPiece(int type, Vector3 at, float rotY, Color c, float scale = 1, float tilt = 0);
     void drawPromotionPicker();
     void drawLabels();
 };

@@ -128,9 +128,10 @@ void App::drawPieces() {
     }
 }
 
-void App::drawPiece(int type, Vector3 at, float rotY, Color c, float scale) {
-    const Matrix world = MatrixMultiply(MatrixMultiply(MatrixScale(scale, scale, scale), MatrixRotateY(rotY)),
-                                        MatrixTranslate(at.x, at.y, at.z));
+void App::drawPiece(int type, Vector3 at, float rotY, Color c, float scale, float tilt) {
+    Matrix rot = MatrixRotateY(rotY);
+    if (tilt != 0) rot = MatrixMultiply(rot, MatrixRotateZ(tilt));  // about the world z axis, so fighters lean along x
+    const Matrix world = MatrixMultiply(MatrixMultiply(MatrixScale(scale, scale, scale), rot), MatrixTranslate(at.x, at.y, at.z));
     for (const PiecePart& part : pieces_.parts(type)) drawMesh(part.mesh, MatrixMultiply(part.local, world), c);
 }
 

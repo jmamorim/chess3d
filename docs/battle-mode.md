@@ -57,3 +57,7 @@ Strikes hit enemy pieces on the board. Their damage never takes a piece below 1 
 - Using an ability resets the repetition count, like a capture.
 
 In a battle, choose a command with 1-4 (5 or U for the Ultimate), the arrow keys and Enter, or the mouse. In battle the AI fires its Ultimate as soon as it is ready; an AI king saves it until it is hurt or debuffed.
+
+## Animations
+
+Every ability has its own animation in the arena (motion plus particles), statuses show light looping effects on their carrier, and Ultimates are short cinematics: the camera pushes in on the user, the screen dims with the Ultimate's name, and the last hit plays in slow motion with a screen shake. Board abilities play a matching effect on the board. All of it is cosmetic and never changes rules, dice or the online protocol. During a battle animation, press Space or click to fast-forward (x4) the events currently playing; the speed resets when the next command is awaited.

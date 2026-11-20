@@ -102,6 +102,8 @@ void App::newGame(int mode) {
 void App::reset(bool battleGame, uint32_t seedBase) {
     game_.reset(battleGame, seedBase);
     boardPopups_.clear();
+    boardFx_.clear();
+    arenaFx_.clear();
     endT_ = 0;
     battle_.reset();
     clearSelection();
@@ -137,7 +139,10 @@ void App::faceSideToMove() {
 
 // The piece on s uses an ability instead of moving; the turn passes. which: 0 = support, 1 = strike.
 void App::useAbility(int s, int which) {
-    for (const battle::AbilityEffect& e : game_.useAbility(s, which)) {
+    const int type = typeOf(pos().sq[s]);
+    const std::vector<battle::AbilityEffect> effects = game_.useAbility(s, which);
+    boardAbilityFx(s, which, type, effects);
+    for (const battle::AbilityEffect& e : effects) {
         if (e.healed > 0) boardPopups_.push_back({e.square, TextFormat("+%d", e.healed), kHeal});
         if (e.buff) boardPopups_.push_back({e.square, buffName(e.buff), SKYBLUE});
         if (e.damage > 0) boardPopups_.push_back({e.square, TextFormat("-%d", e.damage), kCheck});
@@ -282,6 +287,7 @@ void App::update(float dt) {
     const float d = dist_ * fmaxf(1.0f, 1.3f / aspect);
     camera_.position = {d * cosf(pitch_) * sinf(yaw_), d * sinf(pitch_), d * cosf(pitch_) * cosf(yaw_)};
 
+    boardFx_.update(dt);  // cosmetic; never gates input
     hovered_ = -1;
     promoHover_ = -1;
     pollNet();
@@ -386,6 +392,7 @@ void App::draw() {
     drawBoard();
     drawPieces();
     drawPromotionPicker();
+    boardFx_.draw();
     EndMode3D();
     drawLabels();
     drawHpBars();

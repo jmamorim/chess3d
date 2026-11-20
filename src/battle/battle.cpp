@@ -96,6 +96,7 @@ std::string Battle::label(int i) const {
 void Battle::push(std::vector<Event>& out, Event e) const {
     e.hp[0] = f_[0].hp;
     e.hp[1] = f_[1].hp;
+    e.move = move_;
     out.push_back(std::move(e));
 }
 
@@ -157,6 +158,7 @@ int Battle::hit(std::vector<Event>& out, int actor, float power, bool pierce, fl
 std::vector<Event> Battle::act(Command c) {
     std::vector<Event> out;
     if (over()) return out;
+    move_ = -1;
     const int me = turn_;
     Fighter& self = f_[me];
     auto st_ = [&](Fighter& f, Status s) -> int& { return f.status[static_cast<int>(s)]; };
@@ -203,6 +205,7 @@ std::vector<Event> Battle::act(Command c) {
         if (st_(self, Status::AtkDown) > 0) --st_(self, Status::AtkDown);
         turn_ = 1 - turn_;
         ++turns_;
+        move_ = -1;
         if (turns_ == kFatigueAfter + 1 && !over()) push(out, {Event::Announce, me, me, 0, false, {}, "Both fighters tire - every blow hits harder!"});
     };
 
@@ -216,6 +219,7 @@ std::vector<Event> Battle::act(Command c) {
     self.stunnedLast = false;
 
     if (!canUse(c)) c = Command::Attack;
+    move_ = static_cast<int8_t>(c);
     const Stats& st = statsOf(self.type);
     auto heal = [&](int percent) {
         const int amount = std::min(maxHp(self.type) - self.hp, maxHp(self.type) * percent / 100);

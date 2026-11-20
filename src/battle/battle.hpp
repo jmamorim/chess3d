@@ -55,6 +55,9 @@ struct Event {
     int hp[2] = {0, 0};  // both fighters' HP once this event has happened
     std::string text;
     const char* tag = nullptr;  // short label shown over `target` (GUARD, WEAKENED, ...)
+    // The Command (as an index) whose action produced this event; -1 for start-of-turn ticks, regen,
+    // stun and fatigue. Only the animation reads it.
+    int8_t move = -1;
 };
 
 class Battle {
@@ -92,6 +95,7 @@ private:
     Fighter f_[2];
     int turn_ = 0;
     int turns_ = 0;  // actions taken so far
+    int8_t move_ = -1;  // stamped on pushed events: the command being carried out, -1 outside one
     std::mt19937 rng_;
     std::mt19937 aiRng_;  // separate stream so asking the AI never shifts the dice (replays stay exact)
 

@@ -26,7 +26,7 @@ endif()
 
 add_executable(chess3d src/main.cpp
   src/app/app.cpp src/render/pieces.cpp src/render/board_view.cpp src/ui/hud.cpp
-  src/battle/battle_scene.cpp src/net/net.cpp src/net/online.cpp)
+  src/battle/battle_scene.cpp src/battle/battle_fx.cpp src/render/fx.cpp src/net/net.cpp src/net/online.cpp)
 target_include_directories(chess3d PRIVATE src)
 target_link_libraries(chess3d PRIVATE chess raylib)
 

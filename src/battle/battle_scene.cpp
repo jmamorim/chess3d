@@ -18,6 +18,9 @@ namespace {
 constexpr float kBattleIntroSeconds = 0.9f;
 constexpr float kBattleEventSeconds = 0.8f;
 constexpr float kBattleAiDelay = 0.5f;
+constexpr float kFastForward = 4.0f;
+constexpr float kUltimateSeconds = 2.2f;  // what a run of Ultimate events is stretched towards
+constexpr float kUltimateSlowMo = 0.35f;
 
 const Color kUltimate{250, 190, 60, 255};
 
@@ -26,6 +29,7 @@ const Color kUltimate{250, 190, 60, 255};
 // Opens the arena for game_.pending(). Skipping the intro is for a battle restored mid-fight.
 void App::openBattle(bool intro) {
     battle_ = std::make_unique<BattleScene>();
+    arenaFx_.clear();
     battle_->shownHp[0] = fight().fighter(0).hp;
     battle_->shownHp[1] = fight().fighter(1).hp;
     if (!intro) battle_->introT = kBattleIntroSeconds;
@@ -39,6 +43,7 @@ void App::finishBattle() {
     const bool attackerWon = fight().winner() == 0;
     game_.finishBattle();
     battle_.reset();
+    arenaFx_.clear();
     if (attackerWon) animate(m);
     else animT_ = 1;
     afterTurn();
@@ -100,16 +105,64 @@ bool App::awaitingHuman() const {
            !aiFighter(fight().turn()) && !remoteFighter(fight().turn());
 }
 
+// The intro, the queued events, or the outro before it can be dismissed: what fast-forward speeds up.
+bool App::animatingBattle() const {
+    const BattleScene& b = *battle_;
+    return b.introT < kBattleIntroSeconds || b.next < b.queue.size() || (fight().over() && b.outroT <= 0.8f);
+}
+
 void App::enqueue(std::vector<battle::Event> events) {
     BattleScene& b = *battle_;
     b.queue = std::move(events);
     b.next = 0;
     b.eventT = 0;
     b.applied = false;
+    b.started = false;
+    b.dur.clear();
+    b.runOf.assign(b.queue.size(), -1);
+    b.runs.clear();
+    for (const battle::Event& e : b.queue) b.dur.push_back(eventSeconds(e));
+    // Stretch (or squeeze) each Ultimate's run of events towards ~2 s, so single hits get room and a
+    // four-hit run doesn't drag on.
+    for (size_t i = 0; i < b.queue.size();) {
+        if (b.queue[i].move != 4) {
+            ++i;
+            continue;
+        }
+        size_t j = i;
+        float sum = 0;
+        for (; j < b.queue.size() && b.queue[j].move == 4; ++j) sum += b.dur[j];
+        const float k = std::clamp(kUltimateSeconds / sum, 0.6f, 1.6f);
+        UltRun run{static_cast<int>(i), static_cast<int>(j) - 1, -1, 0};
+        for (size_t n = i; n < j; ++n) {
+            b.dur[n] *= k;
+            run.total += b.dur[n];
+            b.runOf[n] = static_cast<int>(b.runs.size());
+            if (b.queue[n].kind == battle::Event::Hit && b.queue[n].actor == b.queue[i].actor) run.lastHit = static_cast<int>(n);
+        }
+        b.runs.push_back(run);
+        i = j;
+    }
 }
 
 void App::updateBattle(float dt) {
     BattleScene& b = *battle_;
+    // Space or a click skips ahead through what is playing; it only scales time, never what happens.
+    const bool animating = animatingBattle();
+    if (!animating) b.speed = 1;
+    else if (IsKeyPressed(KEY_SPACE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) b.speed = kFastForward;
+    float scale = b.speed;
+    if (b.next < b.queue.size() && b.runOf[b.next] >= 0 && static_cast<int>(b.next) == b.runs[b.runOf[b.next]].lastHit)
+        scale *= kUltimateSlowMo;
+    dt *= scale;
+
+    arenaFx_.update(dt);
+    b.shake = fmaxf(0.0f, b.shake - dt);
+    b.flash = fmaxf(0.0f, b.flash - dt * 1.8f);
+    const bool cinematic = b.next < b.queue.size() && b.runOf[b.next] >= 0;
+    if (cinematic) b.camActor = b.queue[b.runs[b.runOf[b.next]].first].actor;
+    b.camBlend += ((cinematic ? 1.0f : 0.0f) - b.camBlend) * fminf(1.0f, dt * 4.0f);
+    if (b.introT >= kBattleIntroSeconds) ambientFx(dt);
     for (Popup& p : b.popups) p.t += dt;
     b.popups.erase(std::remove_if(b.popups.begin(), b.popups.end(), [](const Popup& p) { return p.t > 1.2f; }),
                    b.popups.end());
@@ -119,8 +172,12 @@ void App::updateBattle(float dt) {
     }
     if (b.next < b.queue.size()) {
         const battle::Event& e = b.queue[b.next];
+        if (!b.started) {
+            b.started = true;
+            startEvent();
+        }
         b.eventT += dt;
-        if (!b.applied && b.eventT >= eventSeconds(e) * 0.45f) {
+        if (!b.applied && b.eventT >= b.dur[b.next] * 0.45f) {
             b.applied = true;
             b.shownHp[0] = e.hp[0];
             b.shownHp[1] = e.hp[1];
@@ -132,10 +189,11 @@ void App::updateBattle(float dt) {
             // A tag follows a heal number a moment later so the two don't overlap.
             if (e.tag) b.popups.push_back({e.target, e.tag, debuffTag(e.tag) ? kCurse : SKYBLUE, e.amount > 0 ? -0.35f : 0.0f});
         }
-        if (b.eventT >= eventSeconds(e)) {
+        if (b.eventT >= b.dur[b.next]) {
             ++b.next;
             b.eventT = 0;
             b.applied = false;
+            b.started = false;
         }
         return;
     }
@@ -198,7 +256,7 @@ float App::pieceTop(int type) {
     return top;
 }
 
-// Returns where the fighter was drawn, for the overhead HP bar.
+// Returns where the fighter rests, for the overhead HP bar (the pose's lunges and jumps are not followed).
 Vector3 App::drawFighter(int i) {
     const BattleScene& b = *battle_;
     const battle::Fighter& f = fight().fighter(i);
@@ -208,26 +266,19 @@ Vector3 App::drawFighter(int i) {
     const float scale = kFighterScale;
     const float intro = fminf(1.0f, b.introT / (kBattleIntroSeconds * 0.7f));
     at.x -= dir * (1 - intro * intro * (3 - 2 * intro)) * 5;
+    const Vector3 rest = at;
+    Pose p;
+    float t = 0;
     if (b.next < b.queue.size()) {
-        using K = battle::Event;
-        const K& e = b.queue[b.next];
-        const float t = b.eventT / eventSeconds(e);
-        if (e.actor == i && (e.kind == K::Hit || e.kind == K::Miss)) at.x += dir * sinf(PI * fminf(1.0f, t * 1.6f)) * 1.5f;
-        if (e.actor == i && e.kind == K::Announce) at.y += sinf(PI * t) * 0.4f;
-        if (e.target == i && e.kind == K::Hit && t > 0.4f) {
-            at.x += sinf(t * 70) * 0.1f * (1 - t);
-            c = mix(c, kCheck, 0.7f * (1 - t));
-        }
-        if (e.target == i && e.kind == K::Miss && t > 0.3f) at.z += sinf(PI * (t - 0.3f) / 0.7f) * 0.7f;
-        if (e.target == i && e.kind == K::Tick) c = mix(c, kCurse, 0.6f * sinf(PI * t));
-        if (e.actor == i && (e.kind == K::Heal || e.kind == K::Guard))
-            c = mix(c, e.kind == K::Heal ? kHeal : SKYBLUE, 0.6f * sinf(PI * t));
+        t = b.eventT / b.dur[b.next];
+        p = eventPose(i, b.next, t);
     }
+    float alpha = p.alpha;
     if (fight().over() && b.next >= b.queue.size() && fight().winner() != i) {
         // Fade out, then stop drawing.
         const float k = fminf(1.0f, b.outroT / 0.8f);
-        if (k >= 1) return at;
-        c.a = static_cast<unsigned char>(255 * (1 - k));
+        if (k >= 1) return rest;
+        alpha *= 1 - k;
     }
     if (b.introT >= kBattleIntroSeconds && b.next >= b.queue.size() && !fight().over() && fight().turn() == i) {
         const float pulse = 0.5f + 0.5f * sinf(static_cast<float>(GetTime()) * 6);
@@ -236,8 +287,17 @@ Vector3 App::drawFighter(int i) {
     if (f.guard > 0 && b.next >= b.queue.size())
         drawMesh(pieces_.disc(), box({0.85f, 0.015f, 0.85f}, {at.x, 0.005f, at.z}), f.guard == 2 ? kSelect : SKYBLUE);
     // Board pieces face -z for White; turn them side-on, facing each other.
-    drawPiece(f.type, at, i == 0 ? -PI / 2 : PI / 2, c, scale);
-    return at;
+    const float yaw = i == 0 ? -PI / 2 : PI / 2;
+    for (int g = p.ghosts; g >= 1; --g) {
+        const Pose old = eventPose(i, b.next, fmaxf(0.0f, t - 0.045f * g));
+        Color gc = mix(c, WHITE, 0.5f);
+        gc.a = static_cast<unsigned char>(110.0f / g * old.alpha);
+        if (gc.a > 4) drawPiece(f.type, Vector3Add(at, old.off), yaw + old.yaw, gc, scale * old.scale, old.tilt);
+    }
+    c = mix(mix(c, p.tint, p.tintAmt), WHITE, p.flash);
+    c.a = static_cast<unsigned char>(255 * fminf(1.0f, fmaxf(0.0f, alpha)));
+    if (c.a > 4) drawPiece(f.type, Vector3Add(at, p.off), yaw + p.yaw, c, scale * p.scale, p.tilt);
+    return rest;
 }
 
 void App::drawPanel(Rectangle r) const {
@@ -256,6 +316,18 @@ void App::drawBattle() {
     Camera3D cam{};
     cam.position = {0, 2.4f * back, 8.6f * back};
     cam.target = {0, 0.35f, 0};  // below the fighters, so they sit above the bottom panels
+    if (b.camBlend > 0.001f) {
+        // Ultimates push in on the user, easing back afterwards.
+        const float k = b.camBlend * b.camBlend * (3 - 2 * b.camBlend), ax = fighterX(b.camActor);
+        cam.position = Vector3Lerp(cam.position, {ax * 0.75f, 1.9f, 5.0f * back}, k);
+        cam.target = Vector3Lerp(cam.target, {ax * 0.4f, 1.0f, 0}, k);
+    }
+    if (b.shake > 0) {
+        const float time = static_cast<float>(GetTime()), amp = fminf(b.shake, 0.6f) * 0.5f;
+        cam.position.x += sinf(time * 93) * amp;
+        cam.position.y += sinf(time * 71 + 1) * amp;
+        cam.target.x += sinf(time * 83 + 2) * amp * 0.5f;
+    }
     cam.up = {0, 1, 0};
     cam.fovy = 40;
     cam.projection = CAMERA_PERSPECTIVE;
@@ -265,7 +337,9 @@ void App::drawBattle() {
     drawMesh(pieces_.disc(), box({4.1f, 0.3f, 4.1f}, {0, -0.29f, 0}), {86, 70, 110, 255});
     Vector3 anchor[2];
     for (int i = 0; i < 2; ++i) anchor[i] = drawFighter(i);
+    arenaFx_.draw();
     EndMode3D();
+    if (b.flash > 0) DrawRectangle(0, 0, W, H, Fade(WHITE, fminf(1.0f, b.flash)));
 
     // Name, status tags and HP bar over each fighter.
     for (int i = 0; i < 2; ++i) {
@@ -331,6 +405,10 @@ void App::drawBattle() {
     const Rectangle top{16, 16, W - 32.0f, 52};
     drawPanel(top);
     DrawText(msg.c_str(), 32, 32, 22, RAYWHITE);
+    if (animatingBattle()) {
+        const char* hint = b.speed > 1 ? "Space: skip (x4)" : "Space: skip";
+        DrawText(hint, W - 32 - MeasureText(hint, 16), 40, 16, Fade(RAYWHITE, 0.6f));
+    }
 
     // Command menu.
     const bool live = awaitingHuman();
@@ -357,6 +435,22 @@ void App::drawBattle() {
         if (!usable && (i == 1 || i == 2)) label += TextFormat("  (ready in %d)", actor.cooldown[i - 1]);
         DrawText(label.c_str(), static_cast<int>(r.x + 14), static_cast<int>(r.y + 9), 20, text);
         DrawText(commandInfo(i, actor.type), static_cast<int>(r.x + 38), static_cast<int>(r.y + 35), 16, Fade(text, 0.7f));
+    }
+
+    // Ultimate title card: the screen dims and the name appears for the first half second of the run.
+    if (b.next < b.queue.size() && b.runOf[b.next] >= 0) {
+        const float el = runElapsed(b.next, b.eventT / b.dur[b.next]);
+        const float env = fminf(fminf(1.0f, el / 0.12f), fmaxf(0.0f, (0.65f - el) / 0.15f));
+        if (env > 0) {
+            const battle::Fighter& user = fight().fighter(b.camActor);
+            const char* name = battle::statsOf(user.type).ultimate;
+            const int size = 72;
+            DrawRectangle(0, 0, W, H, Fade(BLACK, 0.55f * env));
+            DrawText(name, (W - MeasureText(name, size)) / 2 + 4, H * 2 / 5 + 4, size, Fade(BLACK, env));
+            DrawText(name, (W - MeasureText(name, size)) / 2, H * 2 / 5, size, Fade(kUltimate, env));
+            const std::string who = fighterName(b.camActor);
+            DrawText(who.c_str(), (W - MeasureText(who.c_str(), 24)) / 2, H * 2 / 5 + size + 6, 24, Fade(RAYWHITE, env));
+        }
     }
 
     // Banners.
